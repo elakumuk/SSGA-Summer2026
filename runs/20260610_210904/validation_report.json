@@ -1,0 +1,21 @@
+{
+  "passed": false,
+  "checks": [
+    {
+      "name": "column_date",
+      "passed": true,
+      "detail": "missing date"
+    },
+    {
+      "name": "column_ticker",
+      "passed": true,
+      "detail": "missing ticker"
+    },
+    {
+      "name": "column_adj_close",
+      "passed": true,
+      "detail": "missing adj_close"
+    },
+    {
+      "name": "positive_adj_close",
+      "passed": 

@@ -1,0 +1,2 @@
+{"stage": "data_ingest", "llm_used": false, "tool_or_model": "", "prompt_summary": "", "human_decision": "", "output_used": "yfinance and FRED providers", "risk_or_limitation": "", "verification": "", "timestamp": "2026-06-10T21:15:27.925032+00:00", "extra": {}}
+{"stage": "feature_engineering", "llm_used": false, "tool_or_model": "", "prompt_summary": "", "human_decision": "", "output_used": "factor library with shift(1) and macro lag", "risk_or_limitation": "", "verification": "", "timestamp": "2026-06-10T21:21:37.347931+00:00", "extra": {}}

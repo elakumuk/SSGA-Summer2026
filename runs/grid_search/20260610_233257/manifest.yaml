@@ -1,0 +1,6 @@
+created_at: '2026-06-10T23:32:57.266187'
+git_commit: 8909acf055aa70ce99756732c2b4bdd3cc93d868
+n_runs: 40
+spec_path: scripts/grid_search_spec.yaml
+sweep_id: '20260610_233257'
+use_cache: true

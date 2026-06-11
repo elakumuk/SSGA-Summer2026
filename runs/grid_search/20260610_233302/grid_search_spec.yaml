@@ -1,0 +1,29 @@
+# Grid search specification — factorial product defines run count.
+# Default: 4 train_end × 5 m2.threshold × 2 transaction_cost_bps = 40 runs.
+
+base_config: config/config.yaml
+
+fixed:
+  split:
+    train_start: "2006-01-01"
+    data_start: "2000-01-01"
+    require_full_universe: true
+
+auto:
+  test_start_from_train_end: true
+
+grid:
+  split.train_end:
+    - "2012-12-31"
+    - "2015-12-31"
+    - "2018-12-31"
+    - "2020-12-31"
+  models.m2.threshold:
+    - 0.50
+    - 0.52
+    - 0.55
+    - 0.58
+    - 0.62
+  portfolio.transaction_cost_bps:
+    - 3
+    - 5

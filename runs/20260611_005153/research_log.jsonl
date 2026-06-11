@@ -1,0 +1,1 @@
+{"stage": "data_ingest", "llm_used": false, "tool_or_model": "", "prompt_summary": "", "human_decision": "", "output_used": "yfinance and FRED providers", "risk_or_limitation": "", "verification": "", "timestamp": "2026-06-11T00:51:53.437835+00:00", "extra": {}}

@@ -1,0 +1,121 @@
+{
+  "passed": false,
+  "checks": [
+    {
+      "name": "column_date",
+      "passed": true,
+      "detail": "missing date"
+    },
+    {
+      "name": "column_ticker",
+      "passed": true,
+      "detail": "missing ticker"
+    },
+    {
+      "name": "column_adj_close",
+      "passed": true,
+      "detail": "missing adj_close"
+    },
+    {
+      "name": "positive_adj_close",
+      "passed": true,
+      "detail": "adj_close must be positive"
+    },
+    {
+      "name": "no_negative_prices",
+      "passed": true,
+      "detail": ""
+    },
+    {
+      "name": "required_tickers_present",
+      "passed": true,
+      "detail": "missing tickers: set()"
+    },
+    {
+      "name": "datetime_index",
+      "passed": true,
+      "detail": "date column is datetime"
+    },
+    {
+      "name": "sorted_ascending",
+      "passed": true,
+      "detail": "dates sorted"
+    },
+    {
+      "name": "no_duplicate_dates_per_ticker",
+      "passed": true,
+      "detail": "unique date/ticker pairs"
+    },
+    {
+      "name": "no_future_dates",
+      "passed": false,
+      "detail": "no future-dated rows"
+    },
+    {
+      "name": "balanced_panel",
+      "passed": true,
+      "detail": "unbalanced dates: 0"
+    }
+  ],
+  "missing_value_summary": {
+    "date": 0.0,
+    "ticker": 0.0,
+    "open": 0.0,
+    "high": 0.0,
+    "low": 0.0,
+    "close": 0.0,
+    "adj_close": 0.0,
+    "volume": 0.0,
+    "return_1w": 0.0010141987829614604,
+    "mom_4w": 0.005070993914807302,
+    "mom_12w": 0.013184584178498986,
+    "mom_26w": 0.02738336713995943,
+    "mom_52w": 0.0537525354969574,
+    "trend_signal": 0.04056795131845842,
+    "vol_4w": 0.005070993914807302,
+    "vol_12w": 0.013184584178498986,
+    "vol_26w": 0.02738336713995943,
+    "drawdown_26w": 0.02636916835699797,
+    "corr_to_spy_26w": 0.02738336713995943,
+    "rank_mom_12w": 0.013184584178498986,
+    "rel_mom_12w": 0.013184584178498986,
+    "mom_vol_interaction": 0.013184584178498986,
+    "z_mom_12w": 0.013184584178498986,
+    "z_mom_26w": 0.02738336713995943,
+    "z_mom_52w": 0.0537525354969574,
+    "z_trend_signal": 0.04056795131845842,
+    "z_vol_12w": 0.013184584178498986,
+    "z_drawdown_26w": 0.02636916835699797,
+    "cross_asset_dispersion_4w": 0.005070993914807302,
+    "cross_asset_dispersion_12w": 0.013184584178498986,
+    "average_pairwise_correlation_26w": 0.02738336713995943,
+    "carry_yield_level": 0.0,
+    "credit_carry_chg": 0.0,
+    "inflation_trend": 0.0,
+    "inflation_up": 0.0,
+    "growth_trend": 0.0,
+    "growth_down": 0.0,
+    "yield_curve": 0.0,
+    "curve_inverted": 0.0,
+    "credit_stress": 0.0,
+    "policy_rate_change": 0.0,
+    "unemployment_change": 0.0,
+    "vix_level": 0.0,
+    "vix_change_4w": 0.0,
+    "risk_off": 0.0,
+    "forward_return_4w": 0.004056795131845842,
+    "m1_target": 0.0,
+    "M1_signal": 0.0,
+    "M1_score": 0.0,
+    "trade_return": 0.004056795131845842,
+    "meta_label": 0.5714285714285714,
+    "M1_conviction": 0.0,
+    "p_success": 0.5714285714285714,
+    "predicted_meta_label": 0.5714285714285714
+  },
+  "effective_start_date": "2007-07-27",
+  "effective_end_date": "2026-06-12",
+  "n_rows": 6902,
+  "n_tickers": 7,
+  "timestamp": "2026-06-11T00:54:36.925721"
+}

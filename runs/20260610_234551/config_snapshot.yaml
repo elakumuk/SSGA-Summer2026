@@ -1,0 +1,101 @@
+assets:
+  tickers:
+  - SPY
+  - TLT
+  - GLD
+  - VEA
+  - VWO
+  - HYG
+  - VNQ
+  vix_ticker: ^VIX
+benchmarks:
+  sixty_forty:
+    GLD: 0.0
+    HYG: 0.2
+    SPY: 0.15
+    TLT: 0.2
+    VEA: 0.15
+    VNQ: 0.15
+    VWO: 0.15
+features:
+  macro_lag_weeks: 4
+  momentum_windows:
+  - 4
+  - 12
+  - 26
+  - 52
+  trend_windows:
+  - 10
+  - 40
+  volatility_windows:
+  - 4
+  - 12
+  - 26
+  winsorize_pct: 0.01
+labels:
+  horizon_weeks: 4
+  negative_threshold: -0.005
+  positive_threshold: 0.005
+  transaction_cost_threshold: 0.001
+llm_features:
+  cache_dir: data/features/llm_cache
+  enabled: false
+macro:
+  fred_series:
+  - CPIAUCSL
+  - UNRATE
+  - INDPRO
+  - FEDFUNDS
+  - DGS10
+  - T10Y2Y
+  - BAA10Y
+models:
+  m1:
+    allow_short: false
+    asset_class_tilts: true
+    long_quantile: 0.58
+    long_quantile_max: 0.68
+    long_quantile_min: 0.52
+    long_threshold: 0.5
+    min_nonzero_signals: 100
+    optimize_thresholds: true
+    quantile_step: 0.02
+    short_quantile: 0.22
+    short_quantile_max: 0.32
+    short_quantile_min: 0.12
+    short_threshold: -0.5
+    type: rule_based
+    weights:
+      macro: 0.2
+      momentum: 0.45
+      risk_penalty: 0.1
+      trend: 0.25
+  m2:
+    calibrate: true
+    threshold: 0.52
+    type: logistic_regression
+paths:
+  backtests: data/backtests
+  features: data/features
+  predictions: data/predictions
+  processed: data/processed
+  raw: data/raw
+  runs: runs
+portfolio:
+  allow_short: true
+  base_budget_per_asset: 0.142857
+  max_abs_asset_weight: 0.25
+  max_gross_exposure: 1.0
+  sizing_mode: linear
+  transaction_cost_bps: 5
+project:
+  frequency: weekly
+  name: finance-meta-labeling-pipeline
+  rebalance: weekly
+split:
+  data_start: '2000-01-01'
+  require_full_universe: true
+  test_end: null
+  test_start: '2016-01-01'
+  train_end: '2015-12-31'
+  train_start: '2006-01-01'

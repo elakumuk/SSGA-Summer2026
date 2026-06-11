@@ -8,6 +8,7 @@ Start here if you are reviewing this branch:
 
 - [`PROJECT_SUMMARY.md`](PROJECT_SUMMARY.md) — current project narrative and M1/M2 interpretation
 - [`DATA_SOURCES_AND_ETL.md`](DATA_SOURCES_AND_ETL.md) — data provenance, ETL, validation, cache behavior, and reviewer caveats
+- [`NEXT_STEPS.md`](NEXT_STEPS.md) — review notes, remaining risks, and recommended research roadmap
 
 Current headline result (**full sample: train + test, unless noted**): the **long-only M1** sleeve is now close to equal-weight return while keeping better Sharpe and much lower drawdown.
 

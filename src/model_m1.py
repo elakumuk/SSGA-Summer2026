@@ -103,6 +103,15 @@ class RuleBasedM1(M1Model):
     def _trend_score(self, X: pd.DataFrame) -> pd.Series:
         return self._col(X, "z_trend_signal")
 
+    def _carry_score(self, X: pd.DataFrame) -> pd.Series:
+        """Per-asset carry score from `feature_engineering._carry_features`.
+
+        Already a rolling 3y z-score (shifted), so this is just a column read.
+        Returns zeros if the carry pillar is not in the panel — keeps the
+        weighted-sum scoring graceful when the feature is disabled upstream.
+        """
+        return self._col(X, "carry_score")
+
     def _risk_penalty(self, X: pd.DataFrame) -> pd.Series:
         vol = self._col(X, "z_vol_12w")
         dd = self._col(X, "drawdown_26w")
@@ -110,6 +119,44 @@ class RuleBasedM1(M1Model):
         if "z_drawdown_26w" in X.columns:
             dd_penalty = dd_penalty + self._col(X, "z_drawdown_26w").clip(lower=0)
         return vol + dd_penalty
+
+    def _hmm_regime_tilt(self, X: pd.DataFrame) -> pd.Series | None:
+        """Asset-class-specific tilt sourced from HMM Bridgewater grid posteriors.
+
+        Returns None when the regime feature is absent, so the caller can fall
+        back to the FRED-flag tilt without changing behavior.
+        """
+        if not getattr(self.cfg, "use_hmm_regime", False):
+            return None
+        if "regime_growth_tilt" not in X.columns or "regime_inflation_tilt" not in X.columns:
+            return None
+        if not isinstance(X.index, pd.MultiIndex) or "ticker" not in X.index.names:
+            return None
+
+        g = self._col(X, "regime_growth_tilt")
+        i = self._col(X, "regime_inflation_tilt")
+        tickers = X.index.get_level_values("ticker")
+        tilt = pd.Series(0.0, index=X.index)
+        # Coefficients are sanity-checked against the four Bridgewater quadrants
+        # to keep the sign correct in each:
+        #   overheat   (G+, I+), goldilocks (G+, I-),
+        #   stagflation(G-, I+), deflation  (G-, I-).
+        # In particular, nominal bonds are penalized strongly when I+ — stagflation
+        # historically the worst environment for duration.
+        for ticker in tickers.unique():
+            mask = tickers == ticker
+            asset_class = ASSET_CLASS_MAP.get(ticker, "equity")
+            if asset_class == "equity":
+                tilt.loc[mask] = (0.50 * g - 0.20 * i).loc[mask]
+            elif asset_class == "reit":
+                tilt.loc[mask] = (0.40 * g - 0.30 * i).loc[mask]
+            elif asset_class == "bond":
+                tilt.loc[mask] = (-0.30 * g - 0.60 * i).loc[mask]
+            elif asset_class == "credit":
+                tilt.loc[mask] = (0.45 * g - 0.20 * i).loc[mask]
+            elif asset_class == "gold":
+                tilt.loc[mask] = (-0.20 * g + 0.55 * i).loc[mask]
+        return tilt
 
     def _asset_class_macro_tilt(self, X: pd.DataFrame) -> pd.Series:
         if not self.cfg.asset_class_tilts:
@@ -143,6 +190,12 @@ class RuleBasedM1(M1Model):
                 tilt.loc[mask] = (0.30 * growth - 0.40 * credit - 0.20 * risk_off).loc[mask]
             elif asset_class == "gold":
                 tilt.loc[mask] = (0.40 * inflation_up + 0.35 * risk_off - 0.15 * growth).loc[mask]
+
+        hmm_tilt = self._hmm_regime_tilt(X)
+        if hmm_tilt is not None:
+            alpha = float(getattr(self.cfg, "hmm_regime_blend", 0.5))
+            alpha = max(0.0, min(1.0, alpha))
+            tilt = (1.0 - alpha) * tilt + alpha * hmm_tilt
         return tilt
 
     def _component_scores(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -151,6 +204,7 @@ class RuleBasedM1(M1Model):
         comps["trend_score"] = self._trend_score(X)
         comps["risk_penalty"] = self._risk_penalty(X)
         comps["macro_score"] = self._asset_class_macro_tilt(X)
+        comps["carry_score"] = self._carry_score(X)
         return comps
 
     def predict_score(self, X: pd.DataFrame) -> pd.Series:
@@ -160,6 +214,7 @@ class RuleBasedM1(M1Model):
             w.get("momentum", 0.45) * comps["momentum_score"]
             + w.get("trend", 0.25) * comps["trend_score"]
             + w.get("macro", 0.20) * comps["macro_score"]
+            + w.get("carry", 0.0) * comps["carry_score"]
             - w.get("risk_penalty", 0.10) * comps["risk_penalty"]
         )
         return score.rename("M1_score")

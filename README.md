@@ -110,6 +110,7 @@ See [docs/PROJECT_BRIEF.md](docs/PROJECT_BRIEF.md) and [docs/ACCEPTANCE_TESTS.md
 - [`DATA_SOURCES_AND_ETL.md`](DATA_SOURCES_AND_ETL.md) — source data, ETL flow, validation checks, and reviewer caveats
 - [`reports/final_report.md`](reports/final_report.md) — strategy comparison (long-only vs long/short M1)
 - [`reports/assets/asset_component_analysis.md`](reports/assets/asset_component_analysis.md) — per-asset buy-and-hold (SPY/S&P 500, bonds, gold, etc.) and data source documentation
+- [`docs/WEEK2_ADDITIONS.md`](docs/WEEK2_ADDITIONS.md) — Week 2 follow-up additions and walk-forward audit (deflated Sharpe + crisis sub-period diagnostics, split-conformal M2 wrapper, transaction-cost sensitivity ladder, walk-forward validation; opt-in carry pillar and HMM regime layer). Walk-forward result: baseline wins 3 / 4 windows on long-only `m1_m2_ecdf`; infrastructure additions are robust by construction.
 
 ## Grid Search (40 runs)
 

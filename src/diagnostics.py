@@ -13,6 +13,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy import stats as scipy_stats
 from sklearn.metrics import (
     accuracy_score,
     brier_score_loss,
@@ -30,6 +31,15 @@ from src.config import PipelineConfig
 logger = logging.getLogger(__name__)
 
 WEEKS_PER_YEAR = 52
+
+# Pinned crisis windows for sub-period stress diagnostics.
+# Bounds are inclusive; dates picked to match the published peak-to-trough span.
+CRISIS_WINDOWS: dict[str, tuple[str, str]] = {
+    "gfc_2008": ("2008-09-01", "2009-03-31"),
+    "covid_2020": ("2020-02-15", "2020-05-31"),
+    "rate_shock_2022": ("2022-01-01", "2022-10-31"),
+    "dotcom_2000_2002": ("2000-03-01", "2002-10-31"),
+}
 
 
 def annualized_return(returns: pd.Series) -> float:
@@ -76,6 +86,227 @@ def information_ratio(strategy: pd.Series, benchmark: pd.Series) -> float:
     if std == 0 or np.isnan(std):
         return 0.0
     return float(active.mean() * np.sqrt(WEEKS_PER_YEAR) / std)
+
+
+# ---------------------------------------------------------------------------
+# Robust performance statistics (Deflated Sharpe Ratio + crisis sub-periods)
+#
+# Bailey & López de Prado (2014) — "The Deflated Sharpe Ratio: Correcting for
+# Selection Bias, Backtest Overfitting, and Non-Normality". Journal of
+# Portfolio Management.
+# ---------------------------------------------------------------------------
+
+_EULER_MASCHERONI = 0.5772156649015329
+
+
+def per_period_sharpe(returns: pd.Series, rf_per_period: float = 0.0) -> float:
+    """Non-annualized Sharpe used inside Bailey & LdP's DSR formula."""
+    r = returns.dropna()
+    if r.empty or r.std() == 0 or np.isnan(r.std()):
+        return 0.0
+    return float((r.mean() - rf_per_period) / r.std())
+
+
+def _expected_max_sharpe_h0(n_trials: int, var_sr: float) -> float:
+    """Expected maximum SR under H0 across n_trials i.i.d. SR estimates.
+
+    Closed-form approximation from Bailey & López de Prado (2014) eq. (8):
+        E[max SR | H0] ~ sqrt(Var(SR)) * (
+            (1 - gamma) * Phi^{-1}(1 - 1/N)
+            + gamma * Phi^{-1}(1 - 1/(N*e))
+        )
+    where gamma is Euler-Mascheroni. Returns 0 when N <= 1 (no multiple-testing
+    penalty).
+    """
+    if n_trials <= 1 or var_sr <= 0:
+        return 0.0
+    inv_phi = scipy_stats.norm.ppf
+    term_1 = (1.0 - _EULER_MASCHERONI) * inv_phi(1.0 - 1.0 / n_trials)
+    term_2 = _EULER_MASCHERONI * inv_phi(1.0 - 1.0 / (n_trials * np.e))
+    return float(np.sqrt(var_sr) * (term_1 + term_2))
+
+
+def deflated_sharpe_ratio(
+    returns: pd.Series,
+    *,
+    n_trials: int = 1,
+    sr_benchmark: float | None = None,
+    rf_per_period: float = 0.0,
+) -> dict[str, float]:
+    """Compute the Deflated Sharpe Ratio (Bailey & López de Prado, 2014).
+
+    DSR = Phi(
+        (SR - SR*) * sqrt(T - 1) /
+        sqrt(1 - skew * SR + (kurt - 1)/4 * SR^2)
+    )
+
+    where SR and SR* are per-period (non-annualized), skew is Fisher skewness
+    of returns, and kurt is the Pearson kurtosis (Fisher excess + 3).
+
+    Parameters
+    ----------
+    returns : per-period strategy returns (e.g., weekly).
+    n_trials : number of independent strategy configurations searched during
+        backtest selection; used to set SR* via the closed-form expected-max
+        formula. Default 1 means no multiple-testing correction.
+    sr_benchmark : explicit per-period SR threshold. Overrides the
+        multiple-testing-derived SR*.
+
+    Returns
+    -------
+    dict with keys: sharpe_per_period, sharpe_annualized, skewness, kurtosis,
+        sr_star, dsr, t_obs, n_trials.
+    """
+    r = returns.dropna()
+    t = len(r)
+    if t < 30 or r.std() == 0 or np.isnan(r.std()):
+        return {
+            "sharpe_per_period": 0.0,
+            "sharpe_annualized": 0.0,
+            "skewness": float("nan"),
+            "kurtosis": float("nan"),
+            "sr_star": 0.0,
+            "dsr": float("nan"),
+            "t_obs": int(t),
+            "n_trials": int(n_trials),
+        }
+
+    sr = per_period_sharpe(r, rf_per_period)
+    skew = float(scipy_stats.skew(r, bias=False))
+    pearson_kurt = float(scipy_stats.kurtosis(r, fisher=False, bias=False))
+
+    # Var(SR) ~ (1 - skew*SR + (kurt - 1)/4 * SR^2) / (T - 1) under non-normal IID.
+    denom = 1.0 - skew * sr + (pearson_kurt - 1.0) / 4.0 * sr * sr
+    denom = max(denom, 1e-9)
+    var_sr = denom / max(t - 1, 1)
+
+    if sr_benchmark is None:
+        sr_star = _expected_max_sharpe_h0(n_trials, var_sr)
+    else:
+        sr_star = float(sr_benchmark)
+
+    z = (sr - sr_star) * np.sqrt(max(t - 1, 1)) / np.sqrt(denom)
+    dsr = float(scipy_stats.norm.cdf(z))
+
+    return {
+        "sharpe_per_period": sr,
+        "sharpe_annualized": sr * np.sqrt(WEEKS_PER_YEAR),
+        "skewness": skew,
+        "kurtosis": pearson_kurt,
+        "sr_star": sr_star,
+        "dsr": dsr,
+        "t_obs": int(t),
+        "n_trials": int(n_trials),
+    }
+
+
+def hit_rate(returns: pd.Series) -> float:
+    r = returns.dropna()
+    if r.empty:
+        return 0.0
+    return float((r > 0).mean())
+
+
+def subperiod_metrics(
+    returns: pd.Series,
+    windows: dict[str, tuple[str, str]] | None = None,
+    *,
+    n_trials: int = 1,
+) -> pd.DataFrame:
+    """Performance table over pinned crisis windows.
+
+    Returns a DataFrame with one row per window (plus a 'full_sample' row),
+    columns: start, end, n_weeks, ann_return, ann_vol, sharpe, dsr,
+    max_drawdown, hit_rate.
+    """
+    if windows is None:
+        windows = CRISIS_WINDOWS
+
+    if not isinstance(returns.index, pd.DatetimeIndex):
+        idx = pd.to_datetime(returns.index)
+        returns = returns.copy()
+        returns.index = idx
+
+    rows = []
+    for label, (start, end) in {**{"full_sample": (None, None)}, **windows}.items():
+        if start is None:
+            window_r = returns
+        else:
+            mask = (returns.index >= pd.Timestamp(start)) & (returns.index <= pd.Timestamp(end))
+            window_r = returns.loc[mask]
+        n = int(window_r.dropna().shape[0])
+        if n == 0:
+            rows.append(
+                {
+                    "window": label,
+                    "start": start,
+                    "end": end,
+                    "n_weeks": 0,
+                    "ann_return": float("nan"),
+                    "ann_vol": float("nan"),
+                    "sharpe": float("nan"),
+                    "dsr": float("nan"),
+                    "max_drawdown": float("nan"),
+                    "hit_rate": float("nan"),
+                }
+            )
+            continue
+        dsr_stats = deflated_sharpe_ratio(window_r, n_trials=n_trials)
+        rows.append(
+            {
+                "window": label,
+                "start": str(window_r.index.min().date()),
+                "end": str(window_r.index.max().date()),
+                "n_weeks": n,
+                "ann_return": annualized_return(window_r),
+                "ann_vol": annualized_volatility(window_r),
+                "sharpe": sharpe_ratio(window_r),
+                "dsr": dsr_stats["dsr"],
+                "max_drawdown": max_drawdown(window_r),
+                "hit_rate": hit_rate(window_r),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def robust_performance_table(
+    results: dict[str, BacktestResult],
+    *,
+    n_trials: int = 1,
+) -> pd.DataFrame:
+    """One-row-per-strategy DSR + skew + kurt summary; sortable for the report."""
+    rows = []
+    for name, res in results.items():
+        stats = deflated_sharpe_ratio(res.returns, n_trials=n_trials)
+        rows.append(
+            {
+                "strategy": name,
+                "sharpe_ann": stats["sharpe_annualized"],
+                "dsr": stats["dsr"],
+                "skewness": stats["skewness"],
+                "kurtosis": stats["kurtosis"],
+                "sr_star": stats["sr_star"],
+                "t_obs": stats["t_obs"],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def crisis_subperiod_table(
+    results: dict[str, BacktestResult],
+    *,
+    windows: dict[str, tuple[str, str]] | None = None,
+    n_trials: int = 1,
+) -> pd.DataFrame:
+    """Stack per-strategy crisis tables into one long DataFrame for reporting."""
+    frames = []
+    for name, res in results.items():
+        sub = subperiod_metrics(res.returns, windows=windows, n_trials=n_trials)
+        sub.insert(0, "strategy", name)
+        frames.append(sub)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
 
 
 def compute_per_asset_ic(
@@ -1751,6 +1982,14 @@ def run_diagnostics(
     metrics_table = build_metrics_table(results)
     metrics_table.to_csv(output_dir / "metrics_table.csv", index=False)
 
+    n_trials = getattr(getattr(cfg, "diagnostics", None), "n_trials", 1) if cfg is not None else 1
+    robust_table = robust_performance_table(results, n_trials=n_trials)
+    if not robust_table.empty:
+        robust_table.to_csv(output_dir / "robust_performance_dsr.csv", index=False)
+    crisis_table = crisis_subperiod_table(results, n_trials=n_trials)
+    if not crisis_table.empty:
+        crisis_table.to_csv(output_dir / "crisis_subperiod_metrics.csv", index=False)
+
     ic = compute_ic(test_panel)
     ic_mean = float(ic.mean()) if not ic.empty else float("nan")
     per_asset_ic = compute_per_asset_ic(test_panel)
@@ -1796,6 +2035,8 @@ def run_diagnostics(
 
     summary = {
         "metrics_table": metrics_table.to_dict(orient="records"),
+        "robust_performance": robust_table.to_dict(orient="records") if not robust_table.empty else [],
+        "crisis_subperiod": crisis_table.to_dict(orient="records") if not crisis_table.empty else [],
         "m2_metrics": m2_metrics,
         "m1_signal_analysis": m1_signal_analysis,
         "ic_mean": ic_mean,

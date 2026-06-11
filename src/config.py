@@ -50,6 +50,16 @@ class FeaturesConfig:
     trend_windows: list[int] = field(default_factory=lambda: [10, 40])
     macro_lag_weeks: int = 4
     winsorize_pct: float = 0.01
+    # HMM macro-regime classifier (Bridgewater 2x2 grid). When enabled,
+    # regime_prob_* columns + regime_growth_tilt / regime_inflation_tilt are
+    # merged into the feature panel and consumed by the M1 macro pillar.
+    hmm_regime_enabled: bool = False
+    hmm_regime_states: int = 4
+    hmm_regime_random_state: int = 42
+    # When False, regime_prob_* / regime_*_tilt columns are dropped before M2
+    # fits, so the regime signal only flows through the M1 macro pillar.
+    # Useful for isolating where the regime layer adds value.
+    hmm_regime_in_m2: bool = True
 
 
 @dataclass
@@ -90,6 +100,12 @@ class M1Config:
     tune_turnover_penalty: float = 0.1
     tune_drawdown_penalty: float = 0.5
     tune_drawdown_cap: float = 0.25
+    # When True, blend HMM regime-tilt features into the asset-class macro pillar.
+    # Requires features.hmm_regime_enabled to write regime_growth_tilt /
+    # regime_inflation_tilt columns into the panel.
+    use_hmm_regime: bool = False
+    # Weight in [0,1] on the HMM regime contribution vs. the raw FRED macro flags.
+    hmm_regime_blend: float = 0.5
 
 
 @dataclass

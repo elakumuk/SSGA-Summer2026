@@ -125,6 +125,79 @@ def _dispersion_features(returns: pd.DataFrame) -> dict[str, pd.DataFrame]:
     }
 
 
+_CARRY_ASSET_CLASS: dict[str, str] = {
+    "SPY": "equity",
+    "VEA": "equity",
+    "VWO": "em_equity",
+    "VNQ": "reit",
+    "TLT": "bond",
+    "HYG": "credit",
+    "GLD": "gold",
+}
+
+
+def _carry_features(
+    macro_wide: pd.DataFrame,
+    tickers: list[str],
+    *,
+    zscore_window: int = 156,
+) -> dict[str, pd.DataFrame]:
+    """Per-asset carry score derived from FRED macro proxies.
+
+    Koijen, Moskowitz, Pedersen & Vrugt (2018) — *Carry*. Journal of Financial
+    Economics 127(2). Carry is defined as the asset's expected return
+    conditional on the underlying spot price staying constant. We use macro
+    proxies because asset-level yield data (TIPS, futures roll, dividend yield
+    surface) isn't in the FRED panel:
+
+        TLT  → term premium       (DGS10 − FEDFUNDS)
+        HYG  → credit spread      (BAA10Y)
+        GLD  → negative real rate (CPI YoY − DGS10)
+        SPY, VEA, VWO, VNQ → negative policy rate (-FEDFUNDS) as a coarse
+            proxy for the carry-on-discount-rate logic of dividend-yielding
+            risk assets in a low-rate regime. VWO gets a small EM premium add.
+
+    Each per-asset proxy is rolling z-scored against its own 3-year history so
+    the four pillars (mom / trend / macro / carry) live on compatible scales,
+    then `.shift(1)` enforces no-lookahead.
+    """
+    if macro_wide.empty:
+        return {}
+    needed = {"DGS10", "FEDFUNDS", "BAA10Y", "CPIAUCSL"}
+    if not needed.issubset(macro_wide.columns):
+        return {}
+
+    term_premium = macro_wide["DGS10"] - macro_wide["FEDFUNDS"]
+    credit_spread = macro_wide["BAA10Y"]
+    cpi_yoy = macro_wide["CPIAUCSL"].pct_change(52) * 100
+    real_rate = macro_wide["DGS10"] - cpi_yoy
+    neg_policy = -macro_wide["FEDFUNDS"]
+
+    per_asset: dict[str, pd.Series] = {}
+    for ticker in tickers:
+        ac = _CARRY_ASSET_CLASS.get(ticker, "equity")
+        if ac == "bond":
+            s = term_premium
+        elif ac == "credit":
+            s = credit_spread
+        elif ac == "gold":
+            s = -real_rate
+        elif ac == "em_equity":
+            s = neg_policy + 2.0  # ~200 bps premium for EM yield differential
+        elif ac == "reit":
+            s = neg_policy - 0.5 * macro_wide["DGS10"]  # REITs hurt by long rates too
+        else:  # equity
+            s = neg_policy
+        per_asset[ticker] = s
+
+    raw = pd.DataFrame(per_asset, index=macro_wide.index)
+    mu = raw.rolling(zscore_window, min_periods=52).mean()
+    sd = raw.rolling(zscore_window, min_periods=52).std().replace(0, np.nan)
+    z = ((raw - mu) / sd).shift(1)
+
+    return {"carry_score": z}
+
+
 def _wide_to_long(feature_dict: dict[str, pd.DataFrame], dates: pd.DatetimeIndex, tickers: list[str]) -> pd.DataFrame:
     rows = []
     for name, wide in feature_dict.items():
@@ -205,6 +278,10 @@ def build_features(
     feature_frames.update(_dispersion_features(returns))
 
     macro_wide = _macro_wide(macro_weekly, cfg.features.macro_lag_weeks)
+    carry_frames = _carry_features(macro_wide, tickers)
+    # Reindex the carry score to the price calendar so it merges cleanly.
+    for name, frame in carry_frames.items():
+        feature_frames[name] = frame.reindex(prices.index).ffill()
     if "DGS10" in macro_wide.columns:
         carry = macro_wide["DGS10"].reindex(prices.index).ffill()
         feature_frames["carry_yield_level"] = pd.DataFrame(
@@ -226,6 +303,25 @@ def build_features(
 
     for col in regime.columns:
         panel[col] = panel["date"].map(regime[col])
+
+    if getattr(cfg.features, "hmm_regime_enabled", False):
+        from src.regime import fit_macro_regime, regime_features_long
+
+        try:
+            regime_fit = fit_macro_regime(
+                macro_wide,
+                train_end=cfg.split.train_end,
+                n_states=cfg.features.hmm_regime_states,
+                random_state=cfg.features.hmm_regime_random_state,
+            )
+            regime_long = regime_features_long(regime_fit, tickers)
+            panel = panel.merge(regime_long, on=["date", "ticker"], how="left")
+            logger.info(
+                "HMM regime features merged: %d posterior cols + 2 tilt cols",
+                len(regime_fit.posteriors.columns),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("HMM regime fit failed (%s); continuing without regime features.", exc)
 
     feature_cols = [c for c in panel.columns if c not in {"date", "ticker", "open", "high", "low", "close", "adj_close", "volume", "return_1w"}]
     panel = winsorize_train_features(panel, feature_cols, cfg.split.train_end, cfg.features.winsorize_pct)

@@ -31,3 +31,26 @@ htmlcov/
 !.env.example
 *.env
 .envrc
+
+# Run outputs and snapshot copies (ablation artifacts)
+runs/
+variant_*/
+baseline_metrics/
+hmm_metrics/
+
+# Data caches: keep small reference cache, drop large generated parquets
+data/predictions/
+data/features/
+data/backtests/
+
+# Walk-forward parquet snapshots (regenerable; keep only the summary CSV)
+docs/ablation_results/snapshots/
+
+# Local PNG staging dir (final visuals live in docs/visuals/)
+results_pngs/
+
+# Zone.Identifier sidecars from Windows downloads
+*Zone.Identifier
+
+.DS_Store
+.Rhistory

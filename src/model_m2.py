@@ -78,6 +78,8 @@ def build_m2_features(panel: pd.DataFrame, cfg: PipelineConfig) -> pd.DataFrame:
     base_features = get_feature_columns(panel.reset_index() if isinstance(panel.index, pd.MultiIndex) else panel)
     extra = [c for c in ("M1_signal", "M1_score") if c in panel.columns]
     m2_cols = list(dict.fromkeys(base_features + extra))
+    if not getattr(cfg.features, "hmm_regime_in_m2", True):
+        m2_cols = [c for c in m2_cols if not c.startswith("regime_")]
     available = [c for c in m2_cols if c in panel.columns]
     return panel[available].copy()
 

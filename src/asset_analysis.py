@@ -521,6 +521,7 @@ def generate_asset_component_report(
         "- **VEA** and **VWO** split developed vs. emerging international equities.",
         "- **GLD** provides commodity/gold exposure; **VNQ** provides listed real estate.",
         "- Strategy results in the main report combine these components via M1 signals and M2 sizing.",
+        "- Data provenance, ETL, validation, cache behavior, and fallback caveats are documented in `../../DATA_SOURCES_AND_ETL.md`.",
         "",
     ]
     report_path.write_text("\n".join(lines))

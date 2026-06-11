@@ -68,6 +68,10 @@ class ModeRunResult:
     backtests_dir: Path
     m1_signal_analysis: dict | None = None
     m1_signal_chart: str | None = None
+    m1_exposure_analysis: dict | None = None
+    per_asset_ic: pd.DataFrame | None = None
+    m1_exposure_chart_rel: str | None = None
+    m1_sens_chart_rel: str | None = None
 
 
 def _cleanup_stale_reports_root(reports_root: Path) -> None:
@@ -115,10 +119,24 @@ def run_m1_mode(
 
     m1 = build_m1_model(mode_cfg)
     X_train = train[feature_cols].fillna(0)
-    m1.fit(X_train, train["m1_target"], forward_returns=train[fwd_col])
-    m1_signals = m1.predict_signal(panel[feature_cols].fillna(0))
-    m1_scores = m1.predict_score(panel[feature_cols].fillna(0))
+    returns_train = returns_wide.loc[
+        (returns_wide.index >= pd.Timestamp(mode_cfg.split.train_start))
+        & (returns_wide.index <= pd.Timestamp(mode_cfg.split.train_end))
+    ]
+    m1.fit(
+        X_train,
+        train["m1_target"],
+        forward_returns=train[fwd_col],
+        panel=train,
+        returns_wide=returns_train,
+        portfolio_cfg=mode_cfg.portfolio,
+    )
+    X_panel = panel[feature_cols].fillna(0)
+    m1_signals = m1.predict_signal(X_panel)
+    m1_scores = m1.predict_score(X_panel)
+    m1_conviction = m1.predict_conviction(X_panel)
     panel = build_meta_labels(panel, m1_signals, m1_scores, mode_cfg)
+    panel["M1_conviction"] = m1_conviction.reindex(panel.index).fillna(0.0)
 
     m2_model, _ = fit_m2(panel, mode_cfg)
     panel = predict_m2(m2_model, panel, mode_cfg)
@@ -142,7 +160,16 @@ def run_m1_mode(
     for name, res in results.items():
         res.returns.to_frame().to_parquet(backtests_dir / f"{name}_returns.parquet")
 
-    diag_summary = run_diagnostics(results, panel, test, mode_cfg.m2.threshold, backtests_dir)
+    diag_summary = run_diagnostics(
+        results,
+        panel,
+        test,
+        mode_cfg.m2.threshold,
+        backtests_dir,
+        cfg=mode_cfg,
+        returns_wide=returns_wide,
+        train_panel=train,
+    )
 
     short_pct = (m1_signals == -1).mean() * 100
     long_pct = (m1_signals == 1).mean() * 100
@@ -154,6 +181,8 @@ def run_m1_mode(
         pd.DataFrame(diag_summary["metrics_table"]).set_index("strategy").loc["m1_only", "annualized_return"],
     )
 
+    exposure_chart = diag_summary.get("exposure_chart")
+    sens_chart = diag_summary.get("sens_chart")
     return ModeRunResult(
         mode_name=mode_name,
         allow_short=allow_short,
@@ -163,6 +192,10 @@ def run_m1_mode(
         m2_metrics=diag_summary["m2_metrics"],
         backtests_dir=backtests_dir,
         m1_signal_analysis=diag_summary.get("m1_signal_analysis"),
+        m1_exposure_analysis=diag_summary.get("m1_exposure_analysis"),
+        per_asset_ic=diag_summary.get("per_asset_ic"),
+        m1_exposure_chart_rel=f"final/{mode_name}/figures/{exposure_chart}" if exposure_chart else None,
+        m1_sens_chart_rel=f"final/{mode_name}/figures/{sens_chart}" if sens_chart else None,
     )
 
 
@@ -230,6 +263,27 @@ def run_pipeline(
         processed_dir,
         use_cache=not refresh_data,
     )
+    requested_start = pd.Timestamp(ingest_start)
+    cached_start = pd.to_datetime(market["date"]).min()
+    # Weekly data requested from a calendar date may naturally begin on the first Friday.
+    # Refresh only when the cache is materially later than the requested history.
+    if not refresh_data and cached_start > requested_start + pd.Timedelta(days=14):
+        logger.warning(
+            "Requested data_start %s is before cached market history (%s). "
+            "Automatically refreshing market and macro data.",
+            ingest_start,
+            cached_start.date(),
+        )
+        market = ingest_market_data(
+            cfg.assets.tickers,
+            cfg.assets.vix_ticker,
+            ingest_start,
+            cfg.split.test_end,
+            raw_dir,
+            processed_dir,
+            use_cache=False,
+        )
+        used_cache = False
     macro = ingest_macro_data(
         cfg.macro.fred_series,
         ingest_start,
@@ -237,7 +291,7 @@ def run_pipeline(
         raw_dir,
         processed_dir,
         market_weekly=market,
-        use_cache=not refresh_data,
+        use_cache=not refresh_data and used_cache,
     )
     market = _clip_panel_to_start(market, ingest_start)
     macro = _clip_panel_to_start(macro, ingest_start)
@@ -269,14 +323,6 @@ def run_pipeline(
             cfg.split.train_start,
             price_report.effective_start_date,
         )
-    if not refresh_data and pd.Timestamp(ingest_start) < pd.to_datetime(market["date"]).min():
-        logger.warning(
-            "Requested data_start %s is before cached market history (%s). "
-            "Re-run with --refresh-data to download earlier prices.",
-            ingest_start,
-            market["date"].min().date(),
-        )
-
     rlog.log_stage("feature_engineering", llm_used=False, output_used="factor library with shift(1) and macro lag")
     base_panel = build_features(market_for_features, macro, cfg, vix_ticker=vix_label)
     base_panel = add_forward_returns(base_panel, cfg.labels.horizon_weeks)

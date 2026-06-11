@@ -7,6 +7,9 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -73,6 +76,232 @@ def information_ratio(strategy: pd.Series, benchmark: pd.Series) -> float:
     if std == 0 or np.isnan(std):
         return 0.0
     return float(active.mean() * np.sqrt(WEEKS_PER_YEAR) / std)
+
+
+def compute_per_asset_ic(
+    panel: pd.DataFrame,
+    *,
+    score_col: str = "M1_score",
+    fwd_col: str | None = None,
+) -> pd.DataFrame:
+    """Spearman IC between M1 score and forward return, per ticker."""
+    df = panel.reset_index()
+    if fwd_col is None:
+        fwd_cols = [c for c in df.columns if c.startswith("forward_return")]
+        fwd_col = fwd_cols[0] if fwd_cols else None
+    if fwd_col is None or "ticker" not in df.columns:
+        return pd.DataFrame(columns=["ticker", "ic", "n_obs", "hit_rate"])
+
+    rows = []
+    for ticker, grp in df.groupby("ticker"):
+        sub = grp[[score_col, fwd_col]].dropna()
+        if len(sub) < 10:
+            continue
+        ic = sub[score_col].corr(sub[fwd_col], method="spearman")
+        active = grp[grp["M1_signal"] != 0] if "M1_signal" in grp.columns else sub
+        hit = float((active[fwd_col] > 0).mean()) if len(active) > 0 and fwd_col in active.columns else float("nan")
+        rows.append({"ticker": ticker, "ic": ic, "n_obs": len(sub), "hit_rate": hit})
+    return pd.DataFrame(rows)
+
+
+def analyze_m1_exposure(
+    result: BacktestResult,
+    benchmark: BacktestResult | None = None,
+) -> dict[str, Any]:
+    """Gross exposure, cash weight, and active-share style stats for M1-only weights."""
+    w = result.weights
+    gross = w.abs().sum(axis=1)
+    cash = (1.0 - gross).clip(lower=0.0)
+    long_gross = w.clip(lower=0).sum(axis=1)
+    short_gross = (-w.clip(upper=0)).sum(axis=1)
+    n_active = (w.abs() > 1e-8).sum(axis=1)
+
+    stats = {
+        "mean_gross_exposure": float(gross.mean()),
+        "median_gross_exposure": float(gross.median()),
+        "mean_cash_weight": float(cash.mean()),
+        "mean_long_gross": float(long_gross.mean()),
+        "mean_short_gross": float(short_gross.mean()),
+        "mean_active_names": float(n_active.mean()),
+        "pct_weeks_below_half_invested": float((gross < 0.5).mean()),
+    }
+
+    if benchmark is not None:
+        bench_gross = benchmark.weights.abs().sum(axis=1)
+        stats["mean_gross_vs_benchmark"] = float(gross.mean() - bench_gross.mean())
+        strat_r = result.returns.fillna(0)
+        bench_r = benchmark.returns.reindex(strat_r.index).fillna(0)
+        # Correlation of weight changes vs benchmark as crude active share proxy
+        w_diff = w.diff().abs().sum(axis=1).fillna(0)
+        stats["mean_weekly_turnover"] = float(w_diff.mean())
+        stats["return_correlation_vs_benchmark"] = float(strat_r.corr(bench_r))
+
+    return {
+        "summary": stats,
+        "gross_exposure": gross.rename("gross_exposure"),
+        "cash_weight": cash.rename("cash_weight"),
+    }
+
+
+def threshold_sensitivity_summary(
+    panel: pd.DataFrame,
+    returns_wide: pd.DataFrame,
+    cfg: PipelineConfig,
+    *,
+    period_mask: pd.Series | None = None,
+) -> pd.DataFrame:
+    """Evaluate M1 threshold quantiles on a period (train for tuning charts)."""
+    from src.backtest import _run_backtest
+    from src.model_m1 import _signals_from_thresholds
+    from src.portfolio import apply_vol_target_wide, build_weights_from_signals
+
+    df = panel.copy()
+    if period_mask is not None:
+        if isinstance(df.index, pd.MultiIndex):
+            dates = df.index.get_level_values("date")
+            df = df[period_mask.reindex(dates).fillna(False).values]
+        else:
+            df = df[period_mask.values]
+
+    if "M1_score" not in df.columns:
+        return pd.DataFrame()
+
+    scores = df["M1_score"]
+    score_vals = scores.dropna()
+    if score_vals.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for long_q in np.arange(cfg.m1.long_quantile_min, cfg.m1.long_quantile_max + 1e-9, cfg.m1.quantile_step):
+        long_t = float(score_vals.quantile(long_q))
+        short_t = float(score_vals.min() - 1.0)
+        sig = _signals_from_thresholds(scores, long_t, short_t, cfg.m1.allow_short)
+        w = build_weights_from_signals(df, sig, portfolio_cfg=cfg.portfolio)
+        w = apply_vol_target_wide(w, returns_wide, cfg.portfolio)
+        bt = _run_backtest("sens", w, returns_wide, cfg.portfolio.transaction_cost_bps)
+        rows.append(
+            {
+                "long_quantile": round(long_q, 2),
+                "long_threshold": long_t,
+                "annualized_return": annualized_return(bt.returns),
+                "sharpe": sharpe_ratio(bt.returns),
+                "max_drawdown": max_drawdown(bt.returns),
+                "mean_gross": float(w.abs().sum(axis=1).mean()),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def save_m1_exposure_charts(exposure: dict[str, Any], output_dir: Path) -> list[str]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    saved: list[str] = []
+    gross = exposure.get("gross_exposure")
+    if gross is None or gross.empty:
+        return saved
+
+    fig, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
+    axes[0].plot(gross.index, gross.values, color="#8172B3", linewidth=1.5)
+    axes[0].axhline(1.0, color="gray", linestyle="--", alpha=0.6, label="100% gross")
+    axes[0].set_ylabel("Gross exposure")
+    axes[0].set_title("M1 Portfolio Gross Exposure Over Time", fontweight="bold")
+    axes[0].legend(loc="upper right")
+    axes[0].grid(True, alpha=0.3)
+
+    cash = exposure.get("cash_weight")
+    if cash is not None and not cash.empty:
+        axes[1].fill_between(cash.index, cash.values, alpha=0.4, color="#C44E52")
+        axes[1].set_ylabel("Implied cash weight")
+    axes[1].set_title("Uninvested Capital (1 − gross exposure)", fontweight="bold")
+    axes[1].grid(True, alpha=0.3)
+
+    p = output_dir / "m1_exposure_over_time.png"
+    fig.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    saved.append(p.name)
+    return saved
+
+
+def save_threshold_sensitivity_chart(sens_df: pd.DataFrame, output_dir: Path) -> str | None:
+    if sens_df.empty:
+        return None
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig, ax1 = plt.subplots(figsize=(9, 5))
+    ax1.plot(sens_df["long_quantile"], sens_df["sharpe"], "o-", color="#8172B3", label="Sharpe")
+    ax1.set_xlabel("Long signal quantile (train)")
+    ax1.set_ylabel("Sharpe", color="#8172B3")
+    ax1.tick_params(axis="y", labelcolor="#8172B3")
+    ax1.grid(True, alpha=0.3)
+
+    ax2 = ax1.twinx()
+    ax2.plot(sens_df["long_quantile"], sens_df["annualized_return"] * 100, "s--", color="#C44E52", label="Ann. return %")
+    ax2.set_ylabel("Ann. return (%)", color="#C44E52")
+    ax2.tick_params(axis="y", labelcolor="#C44E52")
+
+    ax1.set_title("M1 Threshold Sensitivity (train period)", fontweight="bold")
+    p = output_dir / "m1_threshold_sensitivity.png"
+    fig.savefig(p, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return p.name
+
+
+def build_m1_exposure_report_section(
+    exposure_analysis: dict[str, Any] | None,
+    per_asset_ic: pd.DataFrame | None,
+    *,
+    chart_rel: str | None = None,
+    sens_chart_rel: str | None = None,
+) -> list[str]:
+    if exposure_analysis is None:
+        return []
+    stats = exposure_analysis.get("summary", {})
+    lines = [
+        "## M1 Exposure & Signal Quality Diagnostics",
+        "",
+        "Understanding **how much capital M1 deploys** versus benchmark buy-and-hold helps separate "
+        "low return from low edge.",
+        "",
+        "### Portfolio Exposure (M1 only)",
+        "",
+        "| Metric | Value |",
+        "| --- | --- |",
+        f"| Mean gross exposure | {_fmt_pct(stats.get('mean_gross_exposure', float('nan')))} |",
+        f"| Median gross exposure | {_fmt_pct(stats.get('median_gross_exposure', float('nan')))} |",
+        f"| Mean implied cash (1 − gross) | {_fmt_pct(stats.get('mean_cash_weight', float('nan')))} |",
+        f"| Mean active names per week | {_fmt_num(stats.get('mean_active_names', float('nan')), 2)} |",
+        f"| Weeks below 50% invested | {_fmt_pct(stats.get('pct_weeks_below_half_invested', float('nan')))} |",
+    ]
+    if "mean_gross_vs_benchmark" in stats:
+        lines.append(f"| Mean gross vs equal-weight | {_fmt_pct(stats.get('mean_gross_vs_benchmark', float('nan')))} |")
+    lines.append("")
+    if chart_rel:
+        lines.extend([f"![M1 exposure over time]({chart_rel})", ""])
+
+    if per_asset_ic is not None and not per_asset_ic.empty:
+        lines.extend(
+            [
+                "### Per-Asset IC (M1 score vs forward return)",
+                "",
+                "| Ticker | IC | Observations | Hit rate (active) |",
+                "| --- | --- | --- | --- |",
+            ]
+        )
+        for _, row in per_asset_ic.sort_values("ic", ascending=False).iterrows():
+            lines.append(
+                f"| {row['ticker']} | {_fmt_num(row['ic'])} | {int(row['n_obs'])} | "
+                f"{_fmt_pct(row['hit_rate']) if not np.isnan(row['hit_rate']) else '—'} |"
+            )
+        lines.append("")
+
+    if sens_chart_rel:
+        lines.extend(
+            [
+                "### Threshold sensitivity (train period)",
+                "",
+                f"![Threshold sensitivity]({sens_chart_rel})",
+                "",
+            ]
+        )
+    return lines
 
 
 def compute_ic(panel: pd.DataFrame, score_col: str = "M1_score", fwd_col: str | None = None) -> pd.Series:
@@ -170,6 +399,39 @@ def build_metrics_table(results: dict[str, BacktestResult]) -> pd.DataFrame:
     rows = []
     for name, res in results.items():
         row = {"strategy": name, **strategy_metrics(res, bench)}
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def build_metrics_table_on_period(
+    results: dict[str, BacktestResult],
+    *,
+    start: str | pd.Timestamp | None = None,
+    end: str | pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Build strategy metrics table for a date-filtered period."""
+    bench = results.get("equal_weight_1_7")
+    bench_returns = None
+    if bench is not None:
+        bench_returns = bench.returns.copy()
+        bench_returns.index = pd.to_datetime(bench_returns.index)
+        if start is not None:
+            bench_returns = bench_returns[bench_returns.index >= pd.Timestamp(start)]
+        if end is not None:
+            bench_returns = bench_returns[bench_returns.index <= pd.Timestamp(end)]
+
+    rows = []
+    for name, res in results.items():
+        row = {"strategy": name, **strategy_metrics_on_period(res.returns, start=start, end=end)}
+        if bench_returns is not None:
+            r = res.returns.copy()
+            r.index = pd.to_datetime(r.index)
+            if start is not None:
+                r = r[r.index >= pd.Timestamp(start)]
+            if end is not None:
+                r = r[r.index <= pd.Timestamp(end)]
+            row["excess_return_vs_benchmark"] = row["annualized_return"] - annualized_return(bench_returns)
+            row["information_ratio"] = information_ratio(r, bench_returns)
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -652,7 +914,7 @@ def generate_final_report(
         "| **Ann. Return** | Geometric average yearly portfolio return after transaction costs |",
         "| **Ann. Volatility** | Standard deviation of weekly returns, scaled to a year |",
         "| **Sharpe** | Return per unit of risk (higher is better; assumes 0% risk-free rate) |",
-        "| **Max Drawdown** | Largest peak-to-trough loss over the full sample |",
+        "| **Max Drawdown** | Largest peak-to-trough loss over the displayed period |",
         "| **Excess vs EW** | Strategy return minus equal-weight benchmark return |",
         "| **Info Ratio** | Consistency of outperformance vs equal-weight (mean active return / tracking error) |",
         "| **Weekly Hit Rate** | Fraction of weeks with positive net strategy return |",
@@ -734,7 +996,8 @@ def generate_final_report(
             "## Limitations",
             "",
             "- yfinance and FRED are research-grade fallbacks, not institutional data",
-            "- Partial FRED series may be missing when downloads time out",
+            "- Partial FRED refreshes preserve cached series or use clearly logged proxy macro fallbacks",
+            "- Data provenance, ETL, validation, cache behavior, and fallback caveats are documented in `../DATA_SOURCES_AND_ETL.md`",
             "- ETF backtests may include survivorship and product-history effects",
             "- Past performance does not predict future results",
             "",
@@ -1163,7 +1426,7 @@ def build_performance_parameters_section(cfg: PipelineConfig) -> list[str]:
         f"| `split.data_start` | {cfg.data_start_resolved()} | Earliest downloaded price date (can precede train for feature warmup) |",
         f"| `split.train_start` | {cfg.split.train_start} | Intended train window start (clipped to effective panel start) |",
         f"| `split.train_end` | {cfg.split.train_end} | Last in-sample date; **primary knob for tuning in-sample fit** |",
-        f"| `split.test_start` | {cfg.split.test_start} | Out-of-sample evaluation begins here (M2 metrics, IC, reported Sharpe) |",
+        f"| `split.test_start` | {cfg.split.test_start} | Out-of-sample evaluation begins here (M2 metrics, IC, and test-period strategy tables) |",
         f"| `split.test_end` | {test_end_disp} | Optional cap on the evaluation window |",
         f"| `split.require_full_universe` | {cfg.split.require_full_universe} | If true, only weeks with all 7 ETFs (~2007+); if false, partial groups allowed |",
         "",
@@ -1197,6 +1460,10 @@ def build_performance_parameters_section(cfg: PipelineConfig) -> list[str]:
         f"| `models.m1.long_quantile` / `short_quantile` | {m1.long_quantile} / {m1.short_quantile} | Starting quantiles for threshold search (higher long quantile → fewer longs) |",
         f"| `models.m1.allow_short` | {m1.allow_short} | Default shorting flag; pipeline always runs both long-only and long/short modes |",
         f"| `models.m1.asset_class_tilts` | {m1.asset_class_tilts} | Macro tilts by asset class (equity, bonds, credit, gold, REIT) |",
+        f"| `models.m1.allocation_mode` | {m1.allocation_mode} | `threshold` (absolute cutoffs) or `top_k` (weekly cross-sectional rank) |",
+        f"| `models.m1.top_k` | {m1.top_k} | Number of names to long each week when `allocation_mode=top_k` |",
+        f"| `models.m1.conviction_sizing` | {m1.conviction_sizing} | Scale weights by normalized M1 score before M2 sizing |",
+        f"| `models.m1.tune_objective` | {m1.tune_objective} | `trade` or `portfolio` Sharpe for threshold tuning (threshold mode only) |",
         "",
         "### M2 Meta-Labeling",
         "",
@@ -1223,6 +1490,8 @@ def build_performance_parameters_section(cfg: PipelineConfig) -> list[str]:
         f"| `portfolio.max_gross_exposure` | {cfg.portfolio.max_gross_exposure} | Cap on sum of absolute weights |",
         f"| `portfolio.max_abs_asset_weight` | {cfg.portfolio.max_abs_asset_weight} | Per-asset weight ceiling |",
         f"| `portfolio.sizing_mode` | {cfg.portfolio.sizing_mode} | How M2 probability maps to position size (binary / linear / ecdf) |",
+        f"| `portfolio.vol_target_ann` | {cfg.portfolio.vol_target_ann} | Annualized vol target for gross scaling (null disables) |",
+        f"| `portfolio.vol_target_lookback_weeks` | {cfg.portfolio.vol_target_lookback_weeks} | Trailing window for realized vol estimate |",
         "",
         "### Features",
         "",
@@ -1262,15 +1531,27 @@ def generate_dual_mode_report(
         )}"
     )
 
+    import shutil
+
     for mode in mode_results:
         analysis = getattr(mode, "m1_signal_analysis", None)
+        mode_chart_dir = final_dir / mode.mode_name
+        mode_chart_dir.mkdir(parents=True, exist_ok=True)
         if analysis:
-            mode_chart_dir = final_dir / mode.mode_name
-            mode_chart_dir.mkdir(parents=True, exist_ok=True)
             chart_path = mode_chart_dir / "m2_m1_signal_analysis.png"
             save_m1_signal_m2_chart(analysis, chart_path)
             mode.m1_signal_chart = chart_path.name
             mode.m1_signal_chart_rel = f"final/{mode.mode_name}/{chart_path.name}"
+        bt_figures = getattr(mode, "backtests_dir", None)
+        if bt_figures is not None:
+            src_fig = Path(bt_figures) / "figures"
+            if src_fig.exists():
+                dst_fig = mode_chart_dir / "figures"
+                dst_fig.mkdir(parents=True, exist_ok=True)
+                for name in ("m1_exposure_over_time.png", "m1_threshold_sensitivity.png"):
+                    src = src_fig / name
+                    if src.exists():
+                        shutil.copy2(src, dst_fig / name)
 
     lines = [
         "# Final Report: AI-Augmented Multi-Asset Meta-Labeling Pipeline",
@@ -1345,10 +1626,30 @@ def generate_dual_mode_report(
     )
 
     for mode in mode_results:
+        if mode.mode_name == "long_only":
+            lines.extend(
+                build_m1_exposure_report_section(
+                    getattr(mode, "m1_exposure_analysis", None),
+                    getattr(mode, "per_asset_ic", None),
+                    chart_rel=getattr(mode, "m1_exposure_chart_rel", None),
+                    sens_chart_rel=getattr(mode, "m1_sens_chart_rel", None),
+                )
+            )
+            break
+
+    for mode in mode_results:
         label = MODE_LABELS.get(mode.mode_name, mode.mode_name)
         chart_prefix = f"final/{mode.mode_name}/"
         save_report_charts(mode.results, mode.m2_metrics, final_dir, subdir=mode.mode_name)
         display_table = format_metrics_table_for_report(mode.metrics_table)
+        test_start = cfg.split.test_start if cfg is not None else None
+        test_end = cfg.split.test_end if cfg is not None else None
+        test_metrics_table = build_metrics_table_on_period(
+            mode.results,
+            start=test_start,
+            end=test_end,
+        )
+        test_display_table = format_metrics_table_for_report(test_metrics_table)
 
         lines.extend(
             [
@@ -1356,7 +1657,18 @@ def generate_dual_mode_report(
                 "",
                 f"`allow_short={mode.allow_short}` — outputs in `data/backtests/{mode.mode_name}/`",
                 "",
+                "### Full-Sample Strategy Metrics",
+                "",
+                "These metrics cover the full effective panel, including train and test periods. "
+                "They are useful for long-run behavior but should not be read as pure OOS performance.",
+                "",
                 _markdown_table(display_table),
+                "",
+                "### Test-Period Strategy Metrics",
+                "",
+                f"These metrics start at `{test_start or 'configured test_start'}` and are the cleanest portfolio-level OOS view in this report.",
+                "",
+                _markdown_table(test_display_table),
                 "",
                 f"### Charts ({label})",
                 "",
@@ -1391,7 +1703,7 @@ def generate_dual_mode_report(
             "| **Ann. Return** | Geometric average yearly portfolio return after transaction costs |",
             "| **Ann. Volatility** | Standard deviation of weekly returns, scaled to a year |",
             "| **Sharpe** | Return per unit of risk (higher is better; assumes 0% risk-free rate) |",
-            "| **Max Drawdown** | Largest peak-to-trough loss over the full sample |",
+            "| **Max Drawdown** | Largest peak-to-trough loss over the displayed period |",
             "| **Excess vs EW** | Strategy return minus equal-weight benchmark return |",
             "| **Info Ratio** | Consistency of outperformance vs equal-weight |",
             "| **Weekly Hit Rate** | Fraction of weeks with positive net strategy return |",
@@ -1417,6 +1729,7 @@ def generate_dual_mode_report(
             "## Limitations",
             "",
             "- yfinance and FRED are research-grade fallbacks, not institutional data",
+            "- Data provenance, ETL, validation, cache behavior, and fallback caveats are documented in `../DATA_SOURCES_AND_ETL.md`",
             "- Past performance does not predict future results",
             "",
         ]
@@ -1430,12 +1743,19 @@ def run_diagnostics(
     test_panel: pd.DataFrame,
     cfg_threshold: float,
     output_dir: Path,
+    *,
+    cfg: PipelineConfig | None = None,
+    returns_wide: pd.DataFrame | None = None,
+    train_panel: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     metrics_table = build_metrics_table(results)
     metrics_table.to_csv(output_dir / "metrics_table.csv", index=False)
 
     ic = compute_ic(test_panel)
     ic_mean = float(ic.mean()) if not ic.empty else float("nan")
+    per_asset_ic = compute_per_asset_ic(test_panel)
+    if not per_asset_ic.empty:
+        per_asset_ic.to_csv(output_dir / "m1_per_asset_ic.csv", index=False)
 
     m2_metrics = m2_classification_metrics(
         test_panel["meta_label"],
@@ -1450,15 +1770,40 @@ def run_diagnostics(
     )
     m1_signal_analysis["by_signal"].to_csv(output_dir / "m1_signal_m2_analysis.csv", index=False)
 
+    m1_exposure_analysis = None
+    threshold_sensitivity = pd.DataFrame()
+    if "m1_only" in results:
+        bench = results.get("equal_weight_1_7")
+        m1_exposure_analysis = analyze_m1_exposure(results["m1_only"], bench)
+        pd.DataFrame([m1_exposure_analysis["summary"]]).to_csv(output_dir / "m1_exposure_summary.csv", index=False)
+
+    if cfg is not None and returns_wide is not None and train_panel is not None:
+        threshold_sensitivity = threshold_sensitivity_summary(train_panel, returns_wide, cfg)
+        if not threshold_sensitivity.empty:
+            threshold_sensitivity.to_csv(output_dir / "m1_threshold_sensitivity.csv", index=False)
+
     figures_dir = output_dir / "figures"
     save_figures(results, test_panel, m2_metrics, ic, figures_dir)
     save_m1_signal_m2_chart(m1_signal_analysis, figures_dir / "m2_m1_signal_analysis.png")
+
+    exposure_chart = None
+    sens_chart = None
+    if m1_exposure_analysis is not None:
+        saved = save_m1_exposure_charts(m1_exposure_analysis, figures_dir)
+        exposure_chart = saved[0] if saved else None
+    if not threshold_sensitivity.empty:
+        sens_chart = save_threshold_sensitivity_chart(threshold_sensitivity, figures_dir)
 
     summary = {
         "metrics_table": metrics_table.to_dict(orient="records"),
         "m2_metrics": m2_metrics,
         "m1_signal_analysis": m1_signal_analysis,
         "ic_mean": ic_mean,
+        "per_asset_ic": per_asset_ic,
+        "m1_exposure_analysis": m1_exposure_analysis,
+        "threshold_sensitivity": threshold_sensitivity,
+        "exposure_chart": exposure_chart,
+        "sens_chart": sens_chart,
     }
     json_summary = {
         **summary,
@@ -1467,6 +1812,11 @@ def run_diagnostics(
             "threshold": m1_signal_analysis["threshold"],
             "by_signal": m1_signal_analysis["by_signal"].to_dict(orient="records"),
         },
+        "per_asset_ic": per_asset_ic.to_dict(orient="records") if not per_asset_ic.empty else [],
+        "m1_exposure_analysis": m1_exposure_analysis["summary"] if m1_exposure_analysis else {},
+        "threshold_sensitivity": threshold_sensitivity.to_dict(orient="records")
+        if not threshold_sensitivity.empty
+        else [],
     }
     with (output_dir / "diagnostics_summary.json").open("w") as f:
         json.dump(json_summary, f, indent=2, default=str)

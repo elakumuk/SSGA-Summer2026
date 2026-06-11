@@ -66,6 +66,14 @@ models:
     short_quantile_min: 0.12
     short_quantile_max: 0.32
     quantile_step: 0.02
+    allocation_mode: top_k
+    top_k: 3
+    top_k_min_score: 0.0
+    conviction_sizing: false
+    tune_objective: portfolio
+    tune_turnover_penalty: 0.1
+    tune_drawdown_penalty: 0.5
+    tune_drawdown_cap: 0.25
   m2:
     type: logistic_regression
     threshold: 0.55
@@ -78,6 +86,9 @@ portfolio:
   transaction_cost_bps: 5
   base_budget_per_asset: 0.142857
   sizing_mode: linear
+  vol_target_ann: 0.12
+  vol_target_lookback_weeks: 26
+  vol_target_max_scale: 2.0
 
 benchmarks:
   sixty_forty:

@@ -190,6 +190,14 @@ def build_features(
 
     mom12 = prices.pct_change(12).shift(1)
     feature_frames["rank_mom_12w"] = _cross_sectional_rank(mom12)
+    ew_ret = returns.mean(axis=1)
+    ew_mom12 = ew_ret.rolling(12).sum().shift(1)
+    rel_mom = mom12.sub(ew_mom12, axis=0)
+    feature_frames["rel_mom_12w"] = rel_mom
+    vol12 = feature_frames.get("vol_12w")
+    if vol12 is not None and "mom_12w" in feature_frames:
+        inv_vol = (1.0 / vol12.replace(0, np.nan)).clip(upper=5.0)
+        feature_frames["mom_vol_interaction"] = feature_frames["mom_12w"] * inv_vol
     for key in ["mom_12w", "mom_26w", "mom_52w", "trend_signal", "vol_12w", "drawdown_26w"]:
         if key in feature_frames:
             feature_frames[f"z_{key}"] = _cross_sectional_zscore(feature_frames[key])
@@ -197,6 +205,16 @@ def build_features(
     feature_frames.update(_dispersion_features(returns))
 
     macro_wide = _macro_wide(macro_weekly, cfg.features.macro_lag_weeks)
+    if "DGS10" in macro_wide.columns:
+        carry = macro_wide["DGS10"].reindex(prices.index).ffill()
+        feature_frames["carry_yield_level"] = pd.DataFrame(
+            {c: carry for c in prices.columns}, index=prices.index
+        )
+    if "BAA10Y" in macro_wide.columns:
+        credit_chg = macro_wide["BAA10Y"].diff(4).reindex(prices.index).ffill()
+        feature_frames["credit_carry_chg"] = pd.DataFrame(
+            {c: credit_chg for c in prices.columns}, index=prices.index
+        )
     vix_data = market_weekly[market_weekly["ticker"] == vix_ticker.replace("^", "")]
     vix_series = None
     if not vix_data.empty:
@@ -223,7 +241,20 @@ def save_model_panel(panel: pd.DataFrame, path: Path) -> None:
 
 
 def get_feature_columns(panel: pd.DataFrame, exclude_labels: bool = True) -> list[str]:
-    exclude = {"adj_close", "return_1w", "open", "high", "low", "close", "volume", "M1_signal", "M1_score", "p_success", "predicted_meta_label"}
+    exclude = {
+        "adj_close",
+        "return_1w",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "M1_signal",
+        "M1_score",
+        "M1_conviction",
+        "p_success",
+        "predicted_meta_label",
+    }
     if exclude_labels:
         exclude |= LABEL_COLUMNS
         exclude |= {c for c in panel.columns if c.startswith("forward_return")}

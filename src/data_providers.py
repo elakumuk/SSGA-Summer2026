@@ -250,7 +250,7 @@ def ingest_market_data(
         return pd.read_parquet(cache_weekly)
 
     all_tickers = list(dict.fromkeys(tickers + [vix_ticker]))
-    daily_provider = YFinanceProvider()
+    daily_provider = provider or YFinanceProvider()
     daily = daily_provider.get_prices(all_tickers, start=start, end=end, frequency="daily")
     weekly = resample_to_weekly(daily)
     daily.to_parquet(raw_dir / "market_daily.parquet", index=False)
@@ -282,6 +282,31 @@ def ingest_macro_data(
     try:
         provider = provider or FredProvider(cache_dir=raw_dir)
         daily = provider.get_macro(series, start=start, end=end, frequency="daily")
+        missing = [sid for sid in series if sid not in set(daily["series"])]
+        if missing:
+            if cache_weekly.exists():
+                cached = pd.read_parquet(cache_weekly)
+                cached_missing = cached[cached["series"].isin(missing)].copy()
+                if not cached_missing.empty:
+                    logger.warning(
+                        "FRED refresh missed %s; preserving cached rows for missing series",
+                        ", ".join(sorted(cached_missing["series"].unique())),
+                    )
+                    daily = pd.concat([daily, cached_missing], ignore_index=True)
+                    missing = [sid for sid in missing if sid not in set(cached_missing["series"])]
+            if missing and market_weekly is not None:
+                logger.warning(
+                    "FRED refresh missed %s; filling missing series with market-derived proxies",
+                    ", ".join(missing),
+                )
+                daily = pd.concat([daily, build_proxy_macro(market_weekly, missing)], ignore_index=True)
+                missing = []
+            if missing and cache_weekly.exists():
+                logger.warning(
+                    "FRED refresh incomplete (%s missing); using existing macro cache instead",
+                    ", ".join(missing),
+                )
+                return pd.read_parquet(cache_weekly)
         weekly = resample_macro_to_weekly(daily)
         daily.to_parquet(cache_daily, index=False)
         weekly.to_parquet(cache_weekly, index=False)

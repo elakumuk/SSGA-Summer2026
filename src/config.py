@@ -79,6 +79,17 @@ class M1Config:
     short_quantile_min: float = 0.12
     short_quantile_max: float = 0.32
     quantile_step: float = 0.02
+    # Cross-sectional allocation: "threshold" (absolute cutoffs) or "top_k" (rank within week).
+    allocation_mode: str = "top_k"
+    top_k: int = 3
+    top_k_min_score: float = 0.0
+    # Scale position size by normalized M1 score magnitude before M2 sizing.
+    conviction_sizing: bool = True
+    # Portfolio-level threshold tuning objective: "trade" or "portfolio".
+    tune_objective: str = "portfolio"
+    tune_turnover_penalty: float = 0.1
+    tune_drawdown_penalty: float = 0.5
+    tune_drawdown_cap: float = 0.25
 
 
 @dataclass
@@ -96,6 +107,10 @@ class PortfolioConfig:
     transaction_cost_bps: float = 5.0
     base_budget_per_asset: float = 1.0 / 7.0
     sizing_mode: str = "linear"
+    # Annualized vol target for gross exposure scaling (null / 0 disables).
+    vol_target_ann: float | None = None
+    vol_target_lookback_weeks: int = 26
+    vol_target_max_scale: float = 2.0
 
 
 @dataclass

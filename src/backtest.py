@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from src.config import PipelineConfig
-from src.portfolio import apply_constraints_by_date, weights_to_wide
+from src.portfolio import apply_constraints_by_date, apply_vol_target_wide, weights_to_wide
 from src.position_sizing import SizingMode, compute_sizes
 
 
@@ -71,6 +71,7 @@ def _run_backtest(
 
 def strategy_weights_from_panel(
     panel: pd.DataFrame,
+    returns_wide: pd.DataFrame,
     cfg: PipelineConfig,
     sizing_mode: SizingMode | str,
     *,
@@ -81,24 +82,28 @@ def strategy_weights_from_panel(
 ) -> pd.DataFrame:
     df = panel.reset_index().copy()
     df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index(["date", "ticker"])
     if use_m2 and "p_success" in df.columns:
-        proba = df.set_index(["date", "ticker"])["p_success"]
         sizes = compute_sizes(
-            proba,
+            df["p_success"],
             sizing_mode,
             threshold=m2_threshold or cfg.m2.threshold,
             train_proba=train_proba,
             train_sorted=train_sorted,
         )
-        df = df.set_index(["date", "ticker"])
         df["size"] = sizes.reindex(df.index).fillna(0.0)
     else:
-        df = df.set_index(["date", "ticker"])
         df["size"] = 1.0
 
-    df["raw_weight"] = df["M1_signal"] * df["size"] * cfg.portfolio.base_budget_per_asset
+    if "M1_conviction" in df.columns:
+        df["raw_weight"] = (
+            df["M1_signal"] * df["size"] * df["M1_conviction"] * cfg.portfolio.base_budget_per_asset
+        )
+    else:
+        df["raw_weight"] = df["M1_signal"] * df["size"] * cfg.portfolio.base_budget_per_asset
     df["weight"] = apply_constraints_by_date(df, cfg.portfolio)
-    return weights_to_wide(df.reset_index())
+    w_wide = weights_to_wide(df.reset_index())
+    return apply_vol_target_wide(w_wide, returns_wide, cfg.portfolio)
 
 
 def run_all_strategies(
@@ -120,7 +125,7 @@ def run_all_strategies(
         returns_wide, cfg.benchmarks.get("sixty_forty", {}), transaction_cost_bps=tc
     )
 
-    m1_w = strategy_weights_from_panel(panel, cfg, SizingMode.LINEAR, use_m2=False)
+    m1_w = strategy_weights_from_panel(panel, returns_wide, cfg, SizingMode.LINEAR, use_m2=False)
     results["m1_only"] = _run_backtest("m1_only", m1_w, returns_wide, tc)
 
     for mode, key in [
@@ -130,6 +135,7 @@ def run_all_strategies(
     ]:
         w = strategy_weights_from_panel(
             panel,
+            returns_wide,
             cfg,
             mode,
             use_m2=True,

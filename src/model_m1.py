@@ -8,6 +8,8 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
 
 from src.config import M1Config, PipelineConfig
 
@@ -32,6 +34,9 @@ class M1Model(ABC):
         y: pd.Series | None = None,
         *,
         forward_returns: pd.Series | None = None,
+        panel: pd.DataFrame | None = None,
+        returns_wide: pd.DataFrame | None = None,
+        portfolio_cfg: object | None = None,
     ) -> M1Model:
         ...
 
@@ -43,6 +48,31 @@ class M1Model(ABC):
     def predict_signal(self, X: pd.DataFrame) -> pd.Series:
         ...
 
+    def predict_conviction(self, X: pd.DataFrame) -> pd.Series:
+        """Normalized M1 conviction in [0, 1]; default uniform when inactive."""
+        scores = self.predict_score(X)
+        return _score_to_conviction(scores, getattr(self, "_train_scores", None))
+
+
+def _score_to_conviction(scores: pd.Series, train_scores: pd.Series | None) -> pd.Series:
+    """Map scores to [0, 1] via train ECDF (fallback: cross-sectional rank per date)."""
+    if train_scores is not None and len(train_scores.dropna()) > 0:
+        sorted_train = np.sort(train_scores.dropna().values)
+        n = len(sorted_train)
+
+        def _ecdf(val: float) -> float:
+            if np.isnan(val):
+                return 0.0
+            return float(np.searchsorted(sorted_train, val, side="right") / n)
+
+        return scores.apply(_ecdf).rename("M1_conviction")
+
+    if isinstance(scores.index, pd.MultiIndex) and "date" in scores.index.names:
+        dates = scores.index.get_level_values("date")
+        return scores.groupby(dates).rank(pct=True).fillna(0.5).rename("M1_conviction")
+    ranks = scores.rank(pct=True)
+    return ranks.fillna(0.5).rename("M1_conviction")
+
 
 class RuleBasedM1(M1Model):
     def __init__(self, cfg: M1Config) -> None:
@@ -50,6 +80,7 @@ class RuleBasedM1(M1Model):
         self.long_threshold = cfg.long_threshold
         self.short_threshold = cfg.short_threshold
         self.weights = cfg.weights
+        self._train_scores: pd.Series | None = None
 
     def _col(self, X: pd.DataFrame, name: str, default: float = 0.0) -> pd.Series:
         if name in X.columns:
@@ -62,8 +93,9 @@ class RuleBasedM1(M1Model):
         if z_cols:
             parts.append(X[z_cols].mean(axis=1))
         if "rank_mom_12w" in X.columns:
-            # Cross-sectional rank in [0, 1] -> roughly [-0.5, 0.5]
             parts.append(X["rank_mom_12w"].fillna(0.5) - 0.5)
+        if "rel_mom_12w" in X.columns:
+            parts.append(X["rel_mom_12w"].fillna(0.0))
         if not parts:
             return pd.Series(0.0, index=X.index)
         return sum(parts) / len(parts)
@@ -73,7 +105,6 @@ class RuleBasedM1(M1Model):
 
     def _risk_penalty(self, X: pd.DataFrame) -> pd.Series:
         vol = self._col(X, "z_vol_12w")
-        # Drawdown feature is negative in stress; penalize low (more negative) values
         dd = self._col(X, "drawdown_26w")
         dd_penalty = (-dd).clip(lower=0)
         if "z_drawdown_26w" in X.columns:
@@ -81,7 +112,6 @@ class RuleBasedM1(M1Model):
         return vol + dd_penalty
 
     def _asset_class_macro_tilt(self, X: pd.DataFrame) -> pd.Series:
-        """Asset-class-specific macro regime tilts instead of one global macro average."""
         if not self.cfg.asset_class_tilts:
             macro_cols = [c for c in X.columns if c in ("inflation_trend", "growth_trend", "yield_curve", "credit_stress", "risk_off")]
             if macro_cols:
@@ -134,8 +164,7 @@ class RuleBasedM1(M1Model):
         )
         return score.rename("M1_score")
 
-    def predict_signal(self, X: pd.DataFrame) -> pd.Series:
-        score = self.predict_score(X)
+    def _signals_threshold(self, score: pd.Series) -> pd.Series:
         if self.cfg.allow_short:
             signals = np.where(
                 score > self.long_threshold,
@@ -144,7 +173,59 @@ class RuleBasedM1(M1Model):
             )
         else:
             signals = np.where(score > self.long_threshold, 1, 0)
-        return pd.Series(signals, index=X.index, name="M1_signal")
+        return pd.Series(signals, index=score.index, name="M1_signal")
+
+    def _signals_top_k(self, score: pd.Series) -> pd.Series:
+        """Weekly cross-sectional top-K long (and bottom-K short if enabled)."""
+        k = max(1, int(self.cfg.top_k))
+        min_score = float(self.cfg.top_k_min_score)
+        signals = pd.Series(0, index=score.index, dtype=int, name="M1_signal")
+
+        if not isinstance(score.index, pd.MultiIndex) or "date" not in score.index.names:
+            ranked = score.rank(ascending=False)
+            long_idx = ranked[ranked <= k].index
+            if min_score > 0:
+                long_idx = score.loc[long_idx][score.loc[long_idx] > min_score].index
+            signals.loc[long_idx] = 1
+            if self.cfg.allow_short:
+                short_ranked = score.rank(ascending=True)
+                short_idx = short_ranked[short_ranked <= k].index
+                if min_score > 0:
+                    short_idx = score.loc[short_idx][score.loc[short_idx] < -min_score].index
+                signals.loc[short_idx] = -1
+            return signals
+
+        dates = score.index.get_level_values("date")
+        for date in pd.Index(dates).unique():
+            mask = dates == date
+            grp = score[mask]
+            if grp.empty:
+                continue
+            long_candidates = grp.nlargest(k)
+            if min_score > 0:
+                long_candidates = long_candidates[long_candidates > min_score]
+            signals.loc[long_candidates.index] = 1
+            if self.cfg.allow_short:
+                short_candidates = grp.nsmallest(k)
+                if min_score > 0:
+                    short_candidates = short_candidates[short_candidates < -min_score]
+                # Avoid overwriting longs
+                for idx in short_candidates.index:
+                    if signals.loc[idx] == 0:
+                        signals.loc[idx] = -1
+        return signals
+
+    def predict_signal(self, X: pd.DataFrame) -> pd.Series:
+        score = self.predict_score(X)
+        if self.cfg.allocation_mode == "top_k":
+            return self._signals_top_k(score)
+        return self._signals_threshold(score)
+
+    def predict_conviction(self, X: pd.DataFrame) -> pd.Series:
+        if not self.cfg.conviction_sizing:
+            signals = self.predict_signal(X)
+            return signals.abs().astype(float).rename("M1_conviction")
+        return _score_to_conviction(self.predict_score(X), self._train_scores)
 
     def fit(
         self,
@@ -152,16 +233,38 @@ class RuleBasedM1(M1Model):
         y: pd.Series | None = None,
         *,
         forward_returns: pd.Series | None = None,
+        panel: pd.DataFrame | None = None,
+        returns_wide: pd.DataFrame | None = None,
+        portfolio_cfg: object | None = None,
     ) -> RuleBasedM1:
         scores = self.predict_score(X)
-        if self.cfg.optimize_thresholds and forward_returns is not None:
-            self.long_threshold, self.short_threshold = tune_thresholds(
-                scores, forward_returns, self.cfg
-            )
-        elif y is not None:
-            self.long_threshold, self.short_threshold = tune_thresholds(
-                scores, None, self.cfg, fallback_quantiles=True
-            )
+        self._train_scores = scores
+
+        if self.cfg.optimize_thresholds and self.cfg.allocation_mode == "threshold":
+            if (
+                self.cfg.tune_objective == "portfolio"
+                and forward_returns is not None
+                and panel is not None
+                and returns_wide is not None
+                and portfolio_cfg is not None
+            ):
+                self.long_threshold, self.short_threshold = tune_thresholds_portfolio(
+                    scores,
+                    forward_returns,
+                    panel,
+                    returns_wide,
+                    self.cfg,
+                    portfolio_cfg,
+                )
+            elif forward_returns is not None:
+                self.long_threshold, self.short_threshold = tune_thresholds(
+                    scores, forward_returns, self.cfg
+                )
+            elif y is not None:
+                self.long_threshold, self.short_threshold = tune_thresholds(
+                    scores, None, self.cfg, fallback_quantiles=True
+                )
+
         nonzero = (self.predict_signal(X) != 0).sum()
         if nonzero < self.cfg.min_nonzero_signals:
             warnings.warn(
@@ -169,12 +272,197 @@ class RuleBasedM1(M1Model):
                 stacklevel=2,
             )
         logger.info(
-            "M1 thresholds: long=%.3f short=%.3f (allow_short=%s)",
+            "M1 allocation=%s top_k=%s thresholds: long=%.3f short=%.3f (allow_short=%s)",
+            self.cfg.allocation_mode,
+            self.cfg.top_k,
             self.long_threshold,
             self.short_threshold,
             self.cfg.allow_short,
         )
         return self
+
+
+class MLM1(M1Model):
+    """Logistic regression M1 using engineered features; outputs probability-based scores."""
+
+    def __init__(self, cfg: M1Config) -> None:
+        self.cfg = cfg
+        self.long_threshold = cfg.long_threshold
+        self.short_threshold = cfg.short_threshold
+        self._train_scores: pd.Series | None = None
+        self._model = LogisticRegression(max_iter=1000, class_weight="balanced")
+        self._scaler = StandardScaler()
+        self._feature_cols: list[str] = []
+
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series | None = None,
+        *,
+        forward_returns: pd.Series | None = None,
+        panel: pd.DataFrame | None = None,
+        returns_wide: pd.DataFrame | None = None,
+        portfolio_cfg: object | None = None,
+    ) -> MLM1:
+        if y is None:
+            raise ValueError("MLM1 requires m1_target labels for training")
+        self._feature_cols = list(X.columns)
+        X_arr = self._scaler.fit_transform(X.fillna(0).values)
+        y_bin = (y > 0).astype(int).values
+        self._model.fit(X_arr, y_bin)
+        scores = self.predict_score(X)
+        self._train_scores = scores
+
+        if self.cfg.optimize_thresholds and self.cfg.allocation_mode == "threshold":
+            if (
+                self.cfg.tune_objective == "portfolio"
+                and panel is not None
+                and returns_wide is not None
+                and portfolio_cfg is not None
+            ):
+                self.long_threshold, self.short_threshold = tune_thresholds_portfolio(
+                    scores,
+                    forward_returns,
+                    panel,
+                    returns_wide,
+                    self.cfg,
+                    portfolio_cfg,
+                )
+            elif forward_returns is not None:
+                self.long_threshold, self.short_threshold = tune_thresholds(scores, forward_returns, self.cfg)
+            else:
+                self.long_threshold, self.short_threshold = tune_thresholds(
+                    scores, None, self.cfg, fallback_quantiles=True
+                )
+        return self
+
+    def predict_score(self, X: pd.DataFrame) -> pd.Series:
+        cols = [c for c in self._feature_cols if c in X.columns]
+        X_use = X.reindex(columns=self._feature_cols, fill_value=0.0) if self._feature_cols else X.fillna(0)
+        if self._feature_cols:
+            X_use = X_use.fillna(0)
+        proba = self._model.predict_proba(self._scaler.transform(X_use.values))[:, 1]
+        # Center around 0 for compatibility with threshold / top_k logic
+        centered = proba - 0.5
+        return pd.Series(centered, index=X.index, name="M1_score")
+
+    def predict_signal(self, X: pd.DataFrame) -> pd.Series:
+        score = self.predict_score(X)
+        if self.cfg.allocation_mode == "top_k":
+            rb = RuleBasedM1(self.cfg)
+            rb.long_threshold = self.long_threshold
+            rb.short_threshold = self.short_threshold
+            return rb._signals_top_k(score)
+        if self.cfg.allow_short:
+            signals = np.where(
+                score > self.long_threshold,
+                1,
+                np.where(score < self.short_threshold, -1, 0),
+            )
+        else:
+            signals = np.where(score > self.long_threshold, 1, 0)
+        return pd.Series(signals, index=score.index, name="M1_signal")
+
+    def predict_conviction(self, X: pd.DataFrame) -> pd.Series:
+        if not self.cfg.conviction_sizing:
+            return self.predict_signal(X).abs().astype(float).rename("M1_conviction")
+        return _score_to_conviction(self.predict_score(X), self._train_scores)
+
+
+def _signals_from_thresholds(
+    scores: pd.Series,
+    long_t: float,
+    short_t: float,
+    allow_short: bool,
+) -> pd.Series:
+    if allow_short:
+        sig = np.where(scores > long_t, 1, np.where(scores < short_t, -1, 0))
+    else:
+        sig = np.where(scores > long_t, 1, 0)
+    return pd.Series(sig, index=scores.index, name="M1_signal")
+
+
+def _portfolio_objective(
+    returns: pd.Series,
+    turnover: pd.Series,
+    *,
+    turnover_penalty: float,
+    drawdown_penalty: float,
+    drawdown_cap: float,
+) -> float:
+    from src.diagnostics import annualized_return, max_drawdown, sharpe_ratio
+
+    r = returns.dropna()
+    if len(r) < 20:
+        return -np.inf
+    sh = sharpe_ratio(r)
+    ann_turn = float(turnover.mean() * 52)
+    dd = abs(max_drawdown(r))
+    dd_pen = max(0.0, dd - drawdown_cap) * drawdown_penalty
+    return sh - turnover_penalty * ann_turn - dd_pen
+
+
+def tune_thresholds_portfolio(
+    scores: pd.Series,
+    forward_returns: pd.Series | None,
+    panel: pd.DataFrame,
+    returns_wide: pd.DataFrame,
+    cfg: M1Config,
+    portfolio_cfg: object,
+) -> tuple[float, float]:
+    """Tune thresholds by maximizing train-period portfolio Sharpe minus penalties."""
+    from src.backtest import _run_backtest
+    from src.portfolio import apply_vol_target_wide, build_weights_from_signals
+
+    best_long, best_short = cfg.long_threshold, cfg.short_threshold
+    best_obj = -np.inf
+
+    long_quantiles = np.arange(cfg.long_quantile_min, cfg.long_quantile_max + 1e-9, cfg.quantile_step)
+    short_quantiles = np.arange(cfg.short_quantile_min, cfg.short_quantile_max + 1e-9, cfg.quantile_step)
+
+    score_vals = scores.dropna()
+    if score_vals.empty:
+        return best_long, best_short
+
+    for long_q in long_quantiles:
+        long_t = float(score_vals.quantile(long_q))
+        short_candidates = short_quantiles if cfg.allow_short else [0.0]
+        for short_q in short_candidates:
+            if cfg.allow_short:
+                short_t = float(score_vals.quantile(short_q))
+                if long_t <= short_t:
+                    continue
+            else:
+                short_t = float(score_vals.min() - 1.0)
+
+            sig = _signals_from_thresholds(scores, long_t, short_t, cfg.allow_short)
+            if (sig != 0).sum() < cfg.min_nonzero_signals:
+                continue
+
+            w = build_weights_from_signals(
+                panel,
+                sig,
+                conviction=pd.Series(1.0, index=sig.index),
+                portfolio_cfg=portfolio_cfg,
+            )
+            w = apply_vol_target_wide(w, returns_wide, portfolio_cfg)
+            bt = _run_backtest("tune", w, returns_wide, getattr(portfolio_cfg, "transaction_cost_bps", 5.0))
+            obj = _portfolio_objective(
+                bt.returns,
+                bt.turnover,
+                turnover_penalty=cfg.tune_turnover_penalty,
+                drawdown_penalty=cfg.tune_drawdown_penalty,
+                drawdown_cap=cfg.tune_drawdown_cap,
+            )
+            if obj > best_obj:
+                best_obj = obj
+                best_long, best_short = long_t, short_t
+
+    if best_obj == -np.inf:
+        return tune_thresholds(scores, forward_returns, cfg, fallback_quantiles=True)
+
+    logger.info("M1 portfolio threshold tuning objective: %.6f", best_obj)
+    return best_long, best_short
 
 
 def tune_thresholds(
@@ -233,14 +521,12 @@ def tune_thresholds(
             trade_ret = sig * aligned["fwd"].values
             mean_ret = trade_ret[mask].mean()
             hit_rate = (trade_ret[mask] > 0).mean()
-            # Favor profitable signals with reasonable hit rate
             obj = mean_ret + 0.25 * (hit_rate - 0.5)
 
             if cfg.allow_short:
                 long_mask = sig == 1
                 short_mask = sig == -1
                 if long_mask.sum() > 0 and short_mask.sum() > 0:
-                    # Penalize shorts that lose money on average in training
                     short_mean = trade_ret[short_mask].mean()
                     if short_mean < 0:
                         obj += short_mean * 0.5
@@ -260,6 +546,8 @@ def build_m1_model(cfg: PipelineConfig) -> M1Model:
     m1_type = cfg.m1.type
     if m1_type == "rule_based":
         return RuleBasedM1(cfg.m1)
+    if m1_type == "ml":
+        return MLM1(cfg.m1)
     raise ValueError(f"Unsupported M1 type: {m1_type}")
 
 

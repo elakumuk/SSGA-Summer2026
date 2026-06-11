@@ -10,8 +10,10 @@ This run executes the pipeline **twice**: once with M1 **long-only** (no short s
 | --- | --- |
 | Effective start | 2007-07-27 |
 | Effective end | 2026-06-12 |
-| Train period | 2006-01-01 to 2020-12-31 |
+| Data download from | 2000-01-01 |
+| Train period (requested) | 2006-01-01 to 2020-12-31 |
 | Test period (M2 evaluation) | 2021-01-01 to latest |
+| Universe mode | all 7 ETFs each week |
 | Assets | SPY, TLT, GLD, VEA, VWO, HYG, VNQ |
 
 ## Configuration Parameters Affecting Performance
@@ -22,19 +24,28 @@ The pipeline reads defaults from `config/config.yaml`. **Split dates** can also 
 
 | Parameter | Current value | Performance impact |
 | --- | --- | --- |
-| `split.train_start` | 2006-01-01 | Earliest date for M1 threshold tuning, feature winsorization, and M2 training |
-| `split.train_end` | 2020-12-31 | Last in-sample date; defines how much history the models learn from |
-| `split.test_start` | 2021-01-01 | Out-of-sample evaluation begins here (M2 metrics, IC, reported Sharpe) |
+| `split.data_start` | 2000-01-01 | Earliest downloaded price date (can precede train for feature warmup) |
+| `split.train_start` | 2006-01-01 | Intended train window start (clipped to effective panel start) |
+| `split.train_end` | 2020-12-31 | Last in-sample date; **primary knob for tuning in-sample fit** |
+| `split.test_start` | 2021-01-01 | Out-of-sample evaluation begins here (M2 metrics, IC, and test-period strategy tables) |
 | `split.test_end` | latest (open-ended) | Optional cap on the evaluation window |
+| `split.require_full_universe` | True | If true, only weeks with all 7 ETFs (~2007+); if false, partial groups allowed |
+
+**Can train_start be before 2006?** Yes in config/CLI, but with `require_full_universe: true` (default) the **effective** sample usually starts ~**2007-07** when VEA and HYG (youngest ETFs) both exist. Dates before that are dropped. Set `require_full_universe: false` or `--partial-universe` to train on subsets (e.g. SPY/TLT/GLD/VNQ/VWO from 2005).
 
 **CLI overrides** (ISO dates, applied after loading config):
 
 ```bash
+# Shorter/longer train, earlier/later test — compare Sharpe in reports/final_report.md
 python -m src.run_pipeline --train-end 2018-12-31 --test-start 2019-01-01
-python -m src.run_pipeline --train-start 2008-01-01 --train-end 2015-12-31 --test-start 2016-01-01
+python -m src.run_pipeline --train-end 2015-12-31 --test-start 2016-01-01
+python -m src.run_pipeline --train-start 2008-01-01 --train-end 2012-12-31 --test-start 2013-01-01
+
+# Earlier history: partial universe before all seven ETFs existed
+python -m src.run_pipeline --data-start 2004-01-01 --train-start 2005-01-01 --train-end 2006-12-31 --test-start 2007-01-01 --partial-universe --refresh-data
 ```
 
-Shorter train windows reduce overfitting risk but give fewer signals for M2; earlier test starts include more regimes (e.g. 2022 rate hikes) in evaluation.
+Shorter train windows reduce overfitting risk but give fewer M2 labels; varying `train_end` is the fastest way to test whether performance is stable across in-sample cutoffs.
 
 ### M1 Rule-Based Side Model
 
@@ -45,6 +56,10 @@ Shorter train windows reduce overfitting risk but give fewer signals for M2; ear
 | `models.m1.long_quantile` / `short_quantile` | 0.58 / 0.22 | Starting quantiles for threshold search (higher long quantile → fewer longs) |
 | `models.m1.allow_short` | False | Default shorting flag; pipeline always runs both long-only and long/short modes |
 | `models.m1.asset_class_tilts` | True | Macro tilts by asset class (equity, bonds, credit, gold, REIT) |
+| `models.m1.allocation_mode` | top_k | `threshold` (absolute cutoffs) or `top_k` (weekly cross-sectional rank) |
+| `models.m1.top_k` | 3 | Number of names to long each week when `allocation_mode=top_k` |
+| `models.m1.conviction_sizing` | False | Scale weights by normalized M1 score before M2 sizing |
+| `models.m1.tune_objective` | portfolio | `trade` or `portfolio` Sharpe for threshold tuning (threshold mode only) |
 
 ### M2 Meta-Labeling
 
@@ -71,6 +86,8 @@ Shorter train windows reduce overfitting risk but give fewer signals for M2; ear
 | `portfolio.max_gross_exposure` | 1.0 | Cap on sum of absolute weights |
 | `portfolio.max_abs_asset_weight` | 0.25 | Per-asset weight ceiling |
 | `portfolio.sizing_mode` | linear | How M2 probability maps to position size (binary / linear / ecdf) |
+| `portfolio.vol_target_ann` | 0.12 | Annualized vol target for gross scaling (null disables) |
+| `portfolio.vol_target_lookback_weeks` | 26 | Trailing window for realized vol estimate |
 
 ### Features
 
@@ -126,13 +143,13 @@ Each row below is a **standalone buy-and-hold** of one ETF: 100% allocated to th
 
 | Ticker | Asset | Class | Ann. Return | Ann. Volatility | Sharpe | Max Drawdown | Total Return | Weekly Hit Rate |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| SPY | SPDR S&P 500 ETF Trust | U.S. Equities | 10.8782% | 18.2811% | 0.5951 | -54.6130% | 607.1129% | 57.3604% |
-| TLT | iShares 20+ Year Treasury Bond ETF | Government Bonds | 2.9717% | 14.3522% | 0.2071 | -47.8267% | 74.1417% | 53.5025% |
+| SPY | SPDR S&P 500 ETF Trust | U.S. Equities | 10.8782% | 18.2811% | 0.5951 | -54.6130% | 607.1128% | 57.3604% |
+| TLT | iShares 20+ Year Treasury Bond ETF | Government Bonds | 2.9717% | 14.3522% | 0.2071 | -47.8268% | 74.1420% | 53.5025% |
 | GLD | SPDR Gold Shares | Commodities / Gold | 9.6506% | 17.1340% | 0.5632 | -44.7446% | 472.6647% | 54.9239% |
 | VEA | Vanguard FTSE Developed Markets ETF | International Equities | 5.1290% | 19.6234% | 0.2614 | -59.0021% | 157.9133% | 55.5330% |
-| VWO | Vanguard FTSE Emerging Markets ETF | Emerging Market Equities | 4.0303% | 22.5913% | 0.1784 | -63.8086% | 111.3700% | 52.7919% |
-| HYG | iShares iBoxx High Yield Corporate Bond ETF | Credit / High Yield | 5.3554% | 11.2039% | 0.4780 | -33.0009% | 168.6410% | 58.4772% |
-| VNQ | Vanguard Real Estate ETF | Real Estate (REITs) | 6.5646% | 26.0759% | 0.2518 | -70.2120% | 233.4693% | 55.3299% |
+| VWO | Vanguard FTSE Emerging Markets ETF | Emerging Market Equities | 4.0303% | 22.5913% | 0.1784 | -63.8086% | 111.3701% | 52.7919% |
+| HYG | iShares iBoxx High Yield Corporate Bond ETF | Credit / High Yield | 5.3554% | 11.2039% | 0.4780 | -33.0008% | 168.6409% | 58.4772% |
+| VNQ | Vanguard Real Estate ETF | Real Estate (REITs) | 6.5646% | 26.0759% | 0.2518 | -70.2120% | 233.4692% | 55.3299% |
 
 ![Individual asset cumulative returns](assets/asset_cumulative_returns.png)
 
@@ -143,11 +160,11 @@ Each row below is a **standalone buy-and-hold** of one ETF: 100% allocated to th
 | Ticker | Asset | Class | Ann. Return | Ann. Volatility | Sharpe | Max Drawdown | Total Return | Weekly Hit Rate |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | SPY | SPDR S&P 500 ETF Trust | U.S. Equities | 9.3926% | 19.1490% | 0.4905 | -54.6130% | 234.8409% | 57.8571% |
-| TLT | iShares 20+ Year Treasury Bond ETF | Government Bonds | 7.6818% | 14.2777% | 0.5380 | -25.1822% | 170.8210% | 56.0000% |
+| TLT | iShares 20+ Year Treasury Bond ETF | Government Bonds | 7.6818% | 14.2777% | 0.5380 | -25.1822% | 170.8214% | 56.0000% |
 | GLD | SPDR Gold Shares | Commodities / Gold | 7.6458% | 17.4949% | 0.4370 | -44.7446% | 169.6071% | 54.2857% |
 | VEA | Vanguard FTSE Developed Markets ETF | International Equities | 3.0057% | 20.8513% | 0.1442 | -59.0021% | 48.9824% | 55.1429% |
-| VWO | Vanguard FTSE Emerging Markets ETF | Emerging Market Equities | 3.1832% | 24.6520% | 0.1291 | -63.8086% | 52.4754% | 52.0000% |
-| HYG | iShares iBoxx High Yield Corporate Bond ETF | Credit / High Yield | 6.0127% | 12.5519% | 0.4790 | -33.0009% | 119.4601% | 60.2857% |
+| VWO | Vanguard FTSE Emerging Markets ETF | Emerging Market Equities | 3.1832% | 24.6519% | 0.1291 | -63.8086% | 52.4755% | 52.0000% |
+| HYG | iShares iBoxx High Yield Corporate Bond ETF | Credit / High Yield | 6.0127% | 12.5519% | 0.4790 | -33.0008% | 119.4600% | 60.2857% |
 | VNQ | Vanguard Real Estate ETF | Real Estate (REITs) | 6.5635% | 28.6584% | 0.2290 | -70.2120% | 135.3171% | 56.7143% |
 
 ### Test Period (2021-01-01 to latest)
@@ -157,9 +174,9 @@ Each row below is a **standalone buy-and-hold** of one ETF: 100% allocated to th
 | SPY | SPDR S&P 500 ETF Trust | U.S. Equities | 14.6131% | 15.9747% | 0.9148 | -23.9272% | 111.1788% | 56.1404% |
 | TLT | iShares 20+ Year Treasury Bond ETF | Government Bonds | -7.7410% | 14.4461% | -0.5359 | -43.7988% | -35.6986% | 47.3684% |
 | GLD | SPDR Gold Shares | Commodities / Gold | 14.7345% | 16.2274% | 0.9080 | -22.5674% | 112.4071% | 56.4912% |
-| VEA | Vanguard FTSE Developed Markets ETF | International Equities | 10.5316% | 16.2355% | 0.6487 | -29.4775% | 73.1166% | 56.4912% |
-| VWO | Vanguard FTSE Emerging Markets ETF | Emerging Market Equities | 6.1403% | 16.5087% | 0.3719 | -33.4800% | 38.6257% | 54.7368% |
-| HYG | iShares iBoxx High Yield Corporate Bond ETF | Credit / High Yield | 3.7583% | 6.8592% | 0.5479 | -15.3951% | 22.4099% | 54.0351% |
+| VEA | Vanguard FTSE Developed Markets ETF | International Equities | 10.5316% | 16.2355% | 0.6487 | -29.4774% | 73.1167% | 56.4912% |
+| VWO | Vanguard FTSE Emerging Markets ETF | Emerging Market Equities | 6.1403% | 16.5087% | 0.3719 | -33.4800% | 38.6256% | 54.7368% |
+| HYG | iShares iBoxx High Yield Corporate Bond ETF | Credit / High Yield | 3.7583% | 6.8592% | 0.5479 | -15.3952% | 22.4099% | 54.0351% |
 | VNQ | Vanguard Real Estate ETF | Real Estate (REITs) | 6.5674% | 18.2858% | 0.3592 | -34.2941% | 41.7106% | 51.9298% |
 
 ![Train vs test asset returns](assets/asset_train_test_returns.png)
@@ -169,10 +186,10 @@ Each row below is a **standalone buy-and-hold** of one ETF: 100% allocated to th
 - **SPY** (S&P 500 (proxy)): 10.8782% annualized, Sharpe 0.5951, max drawdown -54.6130% — U.S. large-cap equity beta and growth exposure.
 - **GLD** (Gold spot price (proxy)): 9.6506% annualized, Sharpe 0.5632, max drawdown -44.7446% — Inflation hedge and safe-haven commodity exposure.
 - **VNQ** (U.S. REITs): 6.5646% annualized, Sharpe 0.2518, max drawdown -70.2120% — Real estate and rate-sensitive income exposure.
-- **HYG** (U.S. high-yield corporate bonds): 5.3554% annualized, Sharpe 0.4780, max drawdown -33.0009% — Credit risk and income exposure.
+- **HYG** (U.S. high-yield corporate bonds): 5.3554% annualized, Sharpe 0.4780, max drawdown -33.0008% — Credit risk and income exposure.
 - **VEA** (Developed ex-U.S. equities): 5.1290% annualized, Sharpe 0.2614, max drawdown -59.0021% — Geographic diversification outside the U.S..
 - **VWO** (Emerging market equities): 4.0303% annualized, Sharpe 0.1784, max drawdown -63.8086% — Emerging market growth and risk premia.
-- **TLT** (Long-duration U.S. Treasuries): 2.9717% annualized, Sharpe 0.2071, max drawdown -47.8267% — Duration and defensive interest-rate exposure.
+- **TLT** (Long-duration U.S. Treasuries): 2.9717% annualized, Sharpe 0.2071, max drawdown -47.8268% — Duration and defensive interest-rate exposure.
 
 See also: [assets/asset_component_analysis.md](assets/asset_component_analysis.md) for the full standalone write-up.
 
@@ -196,8 +213,8 @@ M1 outputs three signal types per asset-week: **short (−1)**, **flat (0)**, or
 
 | M1 Signal | Observations | Share | Labeled Trades | M1 Hit Rate | Mean Trade Return | M2 Approval Rate | Hit Rate (M2 Approved) | M2 Precision | M2 Recall | M2 F1 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Flat (0) | 1129 | 56.5915% | 0 | — | — | — | — | — | — | — |
-| Long (+1) | 866 | 43.4085% | 866 | 59.9307% | 0.7690% | 95.9584% | 60.0481% | 0.6005 | 0.9615 | 0.7393 |
+| Flat (0) | 1140 | 57.1429% | 0 | — | — | — | — | — | — | — |
+| Long (+1) | 855 | 42.8571% | 855 | 58.9474% | 0.8266% | 100.0000% | 58.9474% | 0.5895 | 1.0000 | 0.7417 |
 
 ![M2 by M1 signal — Long Only (no shorts)](final/long_only/m2_m1_signal_analysis.png)
 *Long-only mode: M1 never emits −1; shorts are disabled at the signal layer.*
@@ -208,34 +225,84 @@ M1 outputs three signal types per asset-week: **short (−1)**, **flat (0)**, or
 
 | M1 Signal | Observations | Share | Labeled Trades | M1 Hit Rate | Mean Trade Return | M2 Approval Rate | Hit Rate (M2 Approved) | M2 Precision | M2 Recall | M2 F1 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Short (−1) | 234 | 11.7293% | 234 | 42.7350% | -0.4143% | 6.4103% | 33.3333% | 0.3333 | 0.0500 | 0.0870 |
-| Flat (0) | 895 | 44.8622% | 0 | — | — | — | — | — | — | — |
-| Long (+1) | 866 | 43.4085% | 866 | 59.9307% | 0.7690% | 86.3741% | 59.0909% | 0.5909 | 0.8516 | 0.6977 |
+| Short (−1) | 855 | 42.8571% | 855 | 40.9357% | -0.2784% | 0.2339% | 100.0000% | 1.0000 | 0.0057 | 0.0114 |
+| Flat (0) | 285 | 14.2857% | 0 | — | — | — | — | — | — | — |
+| Long (+1) | 855 | 42.8571% | 855 | 58.9474% | 0.8266% | 65.4971% | 57.5000% | 0.5750 | 0.6389 | 0.6053 |
 
 ![M2 by M1 signal — Long / Short](final/long_short/m2_m1_signal_analysis.png)
 ## M1 Mode Comparison (M1 Only)
 
 | Mode | Ann. Return | Sharpe | Max Drawdown |
 | --- | --- | --- | --- |
-| Long Only (no shorts) | 3.7800% | 0.6605 | -17.1473% |
-| Long / Short | 2.2935% | 0.4037 | -13.0652% |
+| Long Only (no shorts) | 7.3198% | 0.7021 | -21.0040% |
+| Long / Short | 1.4041% | 0.2031 | -14.8093% |
 
 ![M1 mode comparison](mode_comparison/m1_mode_comparison.png)
 
 *Left: cumulative M1-only returns. Right: return, Sharpe (×10), and drawdown by mode.*
 
+## M1 Exposure & Signal Quality Diagnostics
+
+Understanding **how much capital M1 deploys** versus benchmark buy-and-hold helps separate low return from low edge.
+
+### Portfolio Exposure (M1 only)
+
+| Metric | Value |
+| --- | --- |
+| Mean gross exposure | 80.6105% |
+| Median gross exposure | 85.7142% |
+| Mean implied cash (1 − gross) | 19.3895% |
+| Mean active names per week | 3.00 |
+| Weeks below 50% invested | 5.0710% |
+| Mean gross vs equal-weight | -19.2881% |
+
+![M1 exposure over time](final/long_only/figures/m1_exposure_over_time.png)
+
+### Per-Asset IC (M1 score vs forward return)
+
+| Ticker | IC | Observations | Hit rate (active) |
+| --- | --- | --- | --- |
+| VEA | 0.1021 | 281 | 60.5556% |
+| HYG | 0.0938 | 281 | — |
+| VWO | 0.0603 | 281 | 57.8947% |
+| GLD | -0.0004 | 281 | 60.0917% |
+| SPY | -0.1039 | 281 | 63.4703% |
+| VNQ | -0.1407 | 281 | 55.1402% |
+| TLT | -0.1938 | 281 | 29.4118% |
+
+### Threshold sensitivity (train period)
+
+![Threshold sensitivity](final/long_only/figures/m1_threshold_sensitivity.png)
+
 ## Results: Long Only (no shorts)
 
 `allow_short=False` — outputs in `data/backtests/long_only/`
 
+### Full-Sample Strategy Metrics
+
+These metrics cover the full effective panel, including train and test periods. They are useful for long-run behavior but should not be read as pure OOS performance.
+
 | Strategy | Ann. Return | Ann. Volatility | Sharpe | Max Drawdown | Excess vs EW | Info Ratio | Weekly Hit Rate |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Equal Weight (1/7) | 7.3796% | 12.8982% | 0.5721 | -39.4430% | 0.0000% | 0.0000 | 56.0852% |
-| 60/40 Benchmark | 6.5640% | 13.2675% | 0.4947 | -43.1363% | -0.8156% | -0.2850 | 56.4909% |
-| M1 Only | 3.7800% | 5.7230% | 0.6605 | -17.1473% | -3.5997% | -0.4362 | 56.7951% |
-| M1 + M2 (Binary) | 4.1713% | 5.1729% | 0.8064 | -11.5267% | -3.2083% | -0.3755 | 56.8966% |
-| M1 + M2 (Linear) | 0.9854% | 1.1686% | 0.8432 | -2.4647% | -6.3943% | -0.5751 | 56.8966% |
-| M1 + M2 (ECDF) | 2.6017% | 3.0197% | 0.8616 | -5.3080% | -4.7780% | -0.4734 | 57.8093% |
+| Equal Weight (1/7) | 7.3625% | 12.8982% | 0.5708 | -39.4430% | 0.0000% | 0.0000 | 55.9838% |
+| 60/40 Benchmark | 6.5640% | 13.2675% | 0.4947 | -43.1363% | -0.7984% | -0.2785 | 56.4909% |
+| M1 Only | 7.3198% | 10.4263% | 0.7021 | -21.0040% | -0.0426% | -0.0413 | 58.8235% |
+| M1 + M2 (Binary) | 7.1641% | 10.3440% | 0.6926 | -23.4770% | -0.1984% | -0.0609 | 58.8235% |
+| M1 + M2 (Linear) | 1.7978% | 2.1391% | 0.8404 | -5.4396% | -5.5647% | -0.5465 | 58.9249% |
+| M1 + M2 (ECDF) | 6.5142% | 7.1713% | 0.9084 | -18.8025% | -0.8483% | -0.1530 | 59.5335% |
+
+### Test-Period Strategy Metrics
+
+These metrics start at `2021-01-01` and are the cleanest portfolio-level OOS view in this report.
+
+| Strategy | Ann. Return | Ann. Volatility | Sharpe | Max Drawdown | Excess vs EW | Info Ratio | Weekly Hit Rate |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Equal Weight (1/7) | 7.3393% | 10.7090% | 0.6853 | -23.8984% | 0.0000% | 0.0000 | 54.3860% |
+| 60/40 Benchmark | 5.1616% | 10.8912% | 0.4739 | -25.8267% | -2.1777% | -0.8578 | 53.6842% |
+| M1 Only | 8.4044% | 10.6797% | 0.7869 | -21.0040% | 1.0651% | 0.2005 | 59.6491% |
+| M1 + M2 (Binary) | 8.4044% | 10.6797% | 0.7869 | -21.0040% | 1.0651% | 0.2005 | 59.6491% |
+| M1 + M2 (Linear) | 1.9244% | 2.2433% | 0.8579 | -4.7374% | -5.4149% | -0.6536 | 59.2982% |
+| M1 + M2 (ECDF) | 6.9321% | 8.1433% | 0.8513 | -16.2947% | -0.4072% | -0.1122 | 59.6491% |
 
 ### Charts (Long Only (no shorts))
 
@@ -255,26 +322,43 @@ M1 outputs three signal types per asset-week: **short (−1)**, **flat (0)**, or
 
 | Metric | Value | Meaning |
 | --- | --- | --- |
-| Accuracy | 0.5935 | Share of correct meta-label predictions |
-| Precision | 0.6005 | Approved trades that were actually profitable |
-| Recall | 0.9615 | Profitable trades that M2 approved |
-| F1 Score | 0.7393 | Balance of precision and recall |
-| AUC | 0.4963 | Ranking quality of M2 probabilities |
-| Brier Score | 0.2410 | Probability calibration error (lower is better) |
-| Mean IC | 0.0957 | Spearman rank correlation of M1 scores vs forward returns |
+| Accuracy | 0.5895 | Share of correct meta-label predictions |
+| Precision | 0.5895 | Approved trades that were actually profitable |
+| Recall | 1.0000 | Profitable trades that M2 approved |
+| F1 Score | 0.7417 | Balance of precision and recall |
+| AUC | 0.5713 | Ranking quality of M2 probabilities |
+| Brier Score | 0.2404 | Probability calibration error (lower is better) |
+| Mean IC | 0.1061 | Spearman rank correlation of M1 scores vs forward returns |
 
 ## Results: Long / Short
 
 `allow_short=True` — outputs in `data/backtests/long_short/`
 
+### Full-Sample Strategy Metrics
+
+These metrics cover the full effective panel, including train and test periods. They are useful for long-run behavior but should not be read as pure OOS performance.
+
 | Strategy | Ann. Return | Ann. Volatility | Sharpe | Max Drawdown | Excess vs EW | Info Ratio | Weekly Hit Rate |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Equal Weight (1/7) | 7.3796% | 12.8982% | 0.5721 | -39.4430% | 0.0000% | 0.0000 | 56.0852% |
-| 60/40 Benchmark | 6.5640% | 13.2675% | 0.4947 | -43.1363% | -0.8156% | -0.2850 | 56.4909% |
-| M1 Only | 2.2935% | 5.6811% | 0.4037 | -13.0652% | -5.0861% | -0.4604 | 53.5497% |
-| M1 + M2 (Binary) | 3.5312% | 4.9457% | 0.7140 | -12.9937% | -3.8485% | -0.4034 | 56.3895% |
-| M1 + M2 (Linear) | 0.6652% | 0.9810% | 0.6781 | -2.7018% | -6.7144% | -0.5913 | 56.5923% |
-| M1 + M2 (ECDF) | 2.2807% | 3.3591% | 0.6790 | -8.6466% | -5.0989% | -0.5028 | 56.7951% |
+| Equal Weight (1/7) | 7.3625% | 12.8982% | 0.5708 | -39.4430% | 0.0000% | 0.0000 | 55.9838% |
+| 60/40 Benchmark | 6.5640% | 13.2675% | 0.4947 | -43.1363% | -0.7984% | -0.2785 | 56.4909% |
+| M1 Only | 1.4041% | 6.9145% | 0.2031 | -14.8093% | -5.9583% | -0.3971 | 51.8256% |
+| M1 + M2 (Binary) | 2.4944% | 6.2918% | 0.3965 | -23.0807% | -4.8681% | -0.4840 | 29.9189% |
+| M1 + M2 (Linear) | 0.6277% | 1.1238% | 0.5585 | -4.2153% | -6.7348% | -0.5987 | 57.0994% |
+| M1 + M2 (ECDF) | 5.3393% | 6.8651% | 0.7777 | -11.0232% | -2.0231% | -0.2108 | 57.8093% |
+
+### Test-Period Strategy Metrics
+
+These metrics start at `2021-01-01` and are the cleanest portfolio-level OOS view in this report.
+
+| Strategy | Ann. Return | Ann. Volatility | Sharpe | Max Drawdown | Excess vs EW | Info Ratio | Weekly Hit Rate |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Equal Weight (1/7) | 7.3393% | 10.7090% | 0.6853 | -23.8984% | 0.0000% | 0.0000 | 54.3860% |
+| 60/40 Benchmark | 5.1616% | 10.8912% | 0.4739 | -25.8267% | -2.1777% | -0.8578 | 53.6842% |
+| M1 Only | 2.6697% | 5.6340% | 0.4738 | -9.1051% | -4.6697% | -0.4552 | 55.0877% |
+| M1 + M2 (Binary) | 1.9426% | 8.1064% | 0.2396 | -23.0807% | -5.3968% | -0.8286 | 47.7193% |
+| M1 + M2 (Linear) | 0.6238% | 1.4583% | 0.4278 | -4.2015% | -6.7156% | -0.7355 | 58.9474% |
+| M1 + M2 (ECDF) | 5.2136% | 6.8177% | 0.7647 | -11.0232% | -2.1258% | -0.2830 | 59.6491% |
 
 ### Charts (Long / Short)
 
@@ -294,13 +378,13 @@ M1 outputs three signal types per asset-week: **short (−1)**, **flat (0)**, or
 
 | Metric | Value | Meaning |
 | --- | --- | --- |
-| Accuracy | 0.5564 | Share of correct meta-label predictions |
-| Precision | 0.5858 | Approved trades that were actually profitable |
-| Recall | 0.7221 | Profitable trades that M2 approved |
-| F1 Score | 0.6469 | Balance of precision and recall |
-| AUC | 0.5491 | Ranking quality of M2 probabilities |
-| Brier Score | 0.2442 | Probability calibration error (lower is better) |
-| Mean IC | 0.0957 | Spearman rank correlation of M1 scores vs forward returns |
+| Accuracy | 0.5509 | Share of correct meta-label predictions |
+| Precision | 0.5765 | Approved trades that were actually profitable |
+| Recall | 0.3794 | Profitable trades that M2 approved |
+| F1 Score | 0.4576 | Balance of precision and recall |
+| AUC | 0.5796 | Ranking quality of M2 probabilities |
+| Brier Score | 0.2466 | Probability calibration error (lower is better) |
+| Mean IC | 0.1061 | Spearman rank correlation of M1 scores vs forward returns |
 
 ### How to read the metrics
 
@@ -309,7 +393,7 @@ M1 outputs three signal types per asset-week: **short (−1)**, **flat (0)**, or
 | **Ann. Return** | Geometric average yearly portfolio return after transaction costs |
 | **Ann. Volatility** | Standard deviation of weekly returns, scaled to a year |
 | **Sharpe** | Return per unit of risk (higher is better; assumes 0% risk-free rate) |
-| **Max Drawdown** | Largest peak-to-trough loss over the full sample |
+| **Max Drawdown** | Largest peak-to-trough loss over the displayed period |
 | **Excess vs EW** | Strategy return minus equal-weight benchmark return |
 | **Info Ratio** | Consistency of outperformance vs equal-weight |
 | **Weekly Hit Rate** | Fraction of weeks with positive net strategy return |
@@ -330,4 +414,5 @@ M1 outputs three signal types per asset-week: **short (−1)**, **flat (0)**, or
 ## Limitations
 
 - yfinance and FRED are research-grade fallbacks, not institutional data
+- Data provenance, ETL, validation, cache behavior, and fallback caveats are documented in `../DATA_SOURCES_AND_ETL.md`
 - Past performance does not predict future results

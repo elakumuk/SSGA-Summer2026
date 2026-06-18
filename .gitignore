@@ -17,3 +17,6 @@ venv/
 # generated run output (keep curated docs in reports/, drop auto-generated)
 reports/results_latest.md
 reports/walk_forward.csv
+
+# office temp/lock files
+~$*

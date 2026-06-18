@@ -139,6 +139,15 @@ content("Objective & Approach", [
     ("Principle: STATIC factors live in M1; DYNAMIC factors live in M2.", 0),
 ], takeaway="Two simple problems beat one hard one — M1 proposes, M2 filters and sizes.")
 
+content("Changes Since Last Review", [
+    ("M1 simplified to a single static factor (momentum + trend); macro & risk moved out.", 0),
+    ("ML layer kept to logistic regression only.", 0),
+    ("Static factors → M1; dynamic factors (macro, volatility, regime) → M2.", 0),
+    ("Macro / regime datasets now feed M2 (not used by earlier work).", 0),
+    ("Added simple evaluations — mean difference, MAE, Brier, calibration MAPE.", 0),
+    ("Out-of-sample confirmation — train/test split + 4-week embargo + walk-forward.", 0),
+], takeaway="Every change follows one rule: static -> M1, dynamic -> M2, keep each layer simple.")
+
 content("Architecture", [
     ("M1 — static, linear directional model (momentum + trend only).", 0),
     ("M2 — dynamic, regime-aware meta-label (logistic regression):", 0),
@@ -202,6 +211,7 @@ content("Key Finding — M2 Does Not Add Value Yet", [
     ("M2's probabilities carry no information — realized success is flat across every predicted bucket:", 0),
     ("predicted 0.14 → realized 0.44   |   predicted 0.82 → realized 0.43", 1),
     ("AUC-ROC = 0.50 full / 0.46 out-of-sample — i.e. random, slightly worse OOS.", 0),
+    ("Simple error metrics agree — Brier 0.31, calibration MAPE ≈ 0.49 (probabilities ~49% off).", 1),
     ("M2 underperforms M1-only in every walk-forward window.", 0),
     ("Held under both proxy and real macro data — robust, not a tuning artifact.", 0),
 ], takeaway="The meta-label as specified (per-asset, 4-week, benchmark-relative) extracts no conditional signal.")

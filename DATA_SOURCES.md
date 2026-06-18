@@ -1,8 +1,8 @@
 # Asset Universe & Data Sources (index-based)
 
-Per State Street direction: research on the **index** (pure series), exploit the ETF
-only at the implementation stage. Seven indices spanning equity / rates / credit /
-inflation / real assets. Internal ticker keys (left) map to these indices.
+Signals are computed on the **index** (a pure series); the ETF is used only at the
+implementation stage. Seven indices span equity / rates / credit / inflation / real
+assets. The ticker keys (left column) map to these indices.
 
 **Reality check (2026-06-18):** free *true-index* history is poor — the FRED HY
 total-return index starts only **2023**, MSCI EAFE/EM on investing.com only **2012**.

@@ -34,7 +34,7 @@ for investing.com exports.
 3. Set `use_index_signal: true` in `config/config.yaml`. Missing files fall back to the
    ETF automatically (logged), so a partial index set still runs.
 
-## ⚠️ History caveat (decide with the mentor)
+## ⚠️ History caveat
 FRED `SP500` only goes back ~10 years. The other series go back further. If the panel
 is restricted to the common date range, the backtest shrinks to ~10y. Options:
 - Use Yahoo `^GSPC` (S&P price index, 1990s+) for S&P to keep long history, **or**

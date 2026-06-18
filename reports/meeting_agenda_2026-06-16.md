@@ -1,15 +1,13 @@
-# SSGA Meta-Labeling — Meeting Notes
-**Date:** 2026-06-16 · Ela Kumuk
+# Multi-Asset Meta-Labeling — Meeting Notes
+**Date:** 2026-06-16
 
 ## Agenda
 
 ### Project Updates
-- Rebuilt the pipeline from a clean, owned codebase instead of extending the
-  inherited one. The prior version over-loaded M1 (Carry pillar, HMM regime,
-  conviction sizing, ~100 experiment runs) — the "too much info on M1" pattern.
-- Kept the correct infrastructure (data layer, no-look-ahead features, backtest);
-  rebuilt M1/M2 to the agreed architecture: M1 simple/static/linear, M2 dynamic/
-  regime-aware (logistic regression), portfolio benchmark-relative / info-ratio.
+- Pipeline restructured to the target architecture: M1 simple/static/linear, M2
+  dynamic/regime-aware (logistic regression), portfolio benchmark-relative with an
+  information-ratio focus. M1 was simplified to the static price factors only.
+- Shared infrastructure (data layer, no-look-ahead features, backtest) retained.
 - End-to-end run is live (~35s, single canonical run).
 - First clean result (note: FRED macro partly proxied locally — real-data rerun
   needed before judging M2):

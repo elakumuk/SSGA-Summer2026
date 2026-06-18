@@ -48,12 +48,12 @@ class BloombergProvider(MarketDataProvider, MacroDataProvider):
 # kind: "fred" / "yahoo" auto-fetchable; "manual" must be downloaded to data/raw/index/.
 INDEX_SOURCES = {
     "SPY": ("yahoo", "^GSPC"),                      # S&P 500 (long history; FRED SP500 = ~10y alt)
-    "HYG": ("fred", "BAMLHYH0A0HYM2TRIV"),         # ICE BofA US HY total return
+    "HYG": ("yahoo", "HYG"),                        # HY ETF proxy (2007+; FRED HY TR index only 2023+)
     "VNQ": ("fred", "NASDAQNQUSB351020"),          # Nasdaq US Benchmark REIT
     "GLD": ("yahoo", "GC=F"),                       # Gold price
-    "VEA": ("manual", "MSCI_EAFE"),                 # investing.com
-    "VWO": ("manual", "MSCI_EM"),                   # investing.com
-    "TLT": ("manual", "SP_USTREASURY_7_10Y"),       # Bloomberg
+    "VEA": ("yahoo", "EFA"),                        # MSCI EAFE ETF proxy (2001+; investing.com index = 2012, Bloomberg = ideal)
+    "VWO": ("yahoo", "EEM"),                        # MSCI EM ETF proxy (2003+; Bloomberg MSCI EM index = ideal)
+    "TLT": ("yahoo", "IEF"),                        # 7-10Y Treasury ETF proxy (Bloomberg index = ideal)
 }
 
 

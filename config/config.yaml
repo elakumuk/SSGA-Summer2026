@@ -6,7 +6,7 @@ data:
   # TODO (State Street: decide 7 vs 9, don't dither):
   universe: [SPY, TLT, GLD, VEA, VWO, HYG, VNQ]   # 9-asset alt: + LQD, DBC
   source: yfinance            # yfinance | bloomberg (index/institutional later)
-  use_index_signal: false     # flip true once index series are wired (longer history)
+  use_index_signal: true     # flip true once index series are wired (longer history)
   frequency: weekly           # Friday close
   data_start: "2000-01-01"
   macro_series: [CPIAUCSL, UNRATE, INDPRO, FEDFUNDS, DGS10, T10Y2Y, BAA10Y]

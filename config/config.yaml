@@ -1,0 +1,66 @@
+# SSGA Meta-Labeling — clean config
+# Philosophy: M1 simple/static/linear · M2 dynamic/regime-aware · benchmark-relative
+
+data:
+  # Research signal computed on these. Trade instrument can be the ETF proxy.
+  # TODO (State Street: decide 7 vs 9, don't dither):
+  universe: [SPY, TLT, GLD, VEA, VWO, HYG, VNQ]   # 9-asset alt: + LQD, DBC
+  source: yfinance            # yfinance | bloomberg (index/institutional later)
+  use_index_signal: false     # flip true once index series are wired (longer history)
+  frequency: weekly           # Friday close
+  data_start: "2000-01-01"
+  macro_series: [CPIAUCSL, UNRATE, INDPRO, FEDFUNDS, DGS10, T10Y2Y, BAA10Y]
+  vix: true
+
+split:
+  train_end: "2020-12-31"
+  test_start: "2021-01-01"
+  embargo_weeks: 4            # NEW: matches the 4-week label horizon to stop leakage
+
+labels:
+  horizon_weeks: 4
+  positive_threshold: 0.005
+  negative_threshold: -0.005
+
+# --- M1: PURE STATIC price signal. momentum + trend only. ---
+# Principle: STATIC factors -> M1, DYNAMIC factors -> M2. Macro and risk are dynamic,
+# so they live in M2 (as features), not here. This keeps M1 maximally simple.
+m1:
+  factors:
+    technical: 1.0            # momentum + trend merged (the only M1 factor)
+  momentum_windows: [4, 12, 26, 52]
+  trend_windows: [10, 40]
+  allow_short: false          # benchmark-relative tilts make outright shorts non-critical
+
+# Risk is DYNAMIC (vol-based) -> handled in M2 as a feature, NOT a static overlay.
+# Thresholds are likewise a separate, later layer (not built now). vol_windows here
+# feeds the volatility feature passed to M2.
+risk_layer:
+  enabled: false              # static overlay OFF; risk handled dynamically in M2
+  vol_windows: [13, 26]
+  strength: 0.5
+
+# --- Baseline benchmark portfolios (static) for comparison. ---
+baselines:
+  equal_weight:    {SPY: 0.143, VEA: 0.143, VWO: 0.143, TLT: 0.143, HYG: 0.143, GLD: 0.143, VNQ: 0.143}
+  moderate_growth: {SPY: 0.25, VEA: 0.15, VWO: 0.10, TLT: 0.20, HYG: 0.15, GLD: 0.05, VNQ: 0.10}
+  institutional:   {SPY: 0.20, VEA: 0.15, VWO: 0.10, TLT: 0.25, HYG: 0.10, GLD: 0.10, VNQ: 0.10}
+
+# --- M2: DYNAMIC, regime-aware. Macro-dated. Rolling refit. ---
+m2:
+  regime_features: [vix, T10Y2Y, BAA10Y, growth_trend, inflation_trend]
+  refit_window_weeks: 52      # ~12 months rolling
+  sizing: ecdf                # binary | linear | ecdf
+
+# --- Portfolio: benchmark-relative active weights, info-ratio oriented ---
+portfolio:
+  benchmark: equal_weight     # 1/N base; active weight = benchmark +/- tilt
+  max_active_tilt: 0.10       # +/- 10% around each benchmark weight
+  max_abs_asset_weight: 0.25
+  max_gross_exposure: 1.00
+  vol_target_ann: 0.12
+  vol_target_lookback_weeks: 26
+
+costs:
+  expense_ratio_bps_annual: 9     # layer 1: ETF-embedded carrying cost
+  transaction_cost_bps: 5         # layer 2: bid-ask + impact per trade

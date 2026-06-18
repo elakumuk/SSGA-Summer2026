@@ -1,0 +1,19 @@
+# data is regenerable + may carry vendor licensing (Bloomberg/index) -> never commit
+data/
+*.parquet
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# os / editor
+.DS_Store
+.vscode/
+.idea/
+
+# generated run output (keep curated docs in reports/, drop auto-generated)
+reports/results_latest.md
+reports/walk_forward.csv

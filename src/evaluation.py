@@ -43,7 +43,22 @@ def classifier_metrics(proba: pd.Series, labels: pd.DataFrame, oos_start: str | 
         "f1": float(f1_score(y, pred, zero_division=0)),
         "auc_roc": float(roc_auc_score(y, p)),
         "auc_pr": float(average_precision_score(y, p)),
+        # simple error-style evaluations (mentor's suggestion: mean diff, MAPE, ...)
+        "mean_diff": float((p - y).mean()),       # avg probability bias (over/under-prediction)
+        "mae": float(np.abs(p - y).mean()),       # mean absolute error
+        "brier": float(((p - y) ** 2).mean()),    # mean squared prob error (calibration)
     }
+
+
+def calibration_mape(proba: pd.Series, labels: pd.DataFrame, bins: int = 5) -> float:
+    """MAPE between predicted and realized success across probability buckets.
+    (Per-observation MAPE is undefined on 0/1 outcomes, so we compute it at the
+    bucket level, where realized rates are non-zero.)"""
+    cal = calibration_table(proba, labels, bins)
+    if cal.empty:
+        return float("nan")
+    realized = cal["realized"].replace(0, np.nan)
+    return float(((cal["mean_pred"] - cal["realized"]).abs() / realized).mean())
 
 
 def calibration_table(proba: pd.Series, labels: pd.DataFrame, bins: int = 5) -> pd.DataFrame:
@@ -73,3 +88,4 @@ def print_report(proba: pd.Series, labels: pd.DataFrame, oos_start: str | None =
     cal = calibration_table(proba, labels)
     if not cal.empty:
         print(cal.to_string(float_format=lambda v: f"{v:,.3f}"))
+        print(f"  calibration MAPE: {calibration_mape(proba, labels):.3f}")

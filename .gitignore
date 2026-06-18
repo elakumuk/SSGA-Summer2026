@@ -20,3 +20,7 @@ reports/walk_forward.csv
 
 # office temp/lock files
 ~$*
+
+# local-only (speaker notes — not for repo)
+make_slides_notes.py
+reports/Meta_Labeling_Deck_NOTES.pptx
